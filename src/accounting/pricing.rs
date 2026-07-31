@@ -100,6 +100,30 @@ fn embedded_table() -> HashMap<String, ModelPricing> {
     m
 }
 
+/// Model families tokensave prices: Anthropic Claude plus the `OpenAI` families
+/// the Codex CLI reports (`gpt-*`, `o1*`, `o3*`, `o4*`, `codex*`).
+///
+/// New families are added here; see `.overlay/notes/adding-a-model.md`. A model
+/// outside these families is left unpriced on purpose rather than guessed at.
+fn is_metered_model(model_id: &str) -> bool {
+    model_id.contains("claude")
+        || model_id.starts_with("gpt-")
+        || model_id.starts_with("o1")
+        || model_id.starts_with("o3")
+        || model_id.starts_with("o4")
+        || model_id.contains("codex")
+}
+
+/// Whether tokensave has a price for `model`.
+///
+/// `false` means the turn's USD cost is unknown, not that it is free: callers
+/// surface an explicit unpriced state rather than a misleading `$0.00`. This is
+/// the guard that keeps a new or routed model from silently reading as free
+/// (see `cost_of_turn`, which returns `0.0` for any unknown model).
+pub fn is_priced(model: &str) -> bool {
+    lookup(model).is_some()
+}
+
 /// Parse `LiteLLM`'s JSON format into our pricing table.
 ///
 /// `LiteLLM` uses per-token costs (e.g. `3e-06` for $3/MTok). We filter to
@@ -111,15 +135,20 @@ fn parse_litellm_json(json: &str) -> Option<HashMap<String, ModelPricing>> {
     let mut table: HashMap<String, ModelPricing> = HashMap::new();
 
     for (model_id, entry) in obj {
-        // Only include Claude/Anthropic models
-        if !model_id.contains("claude") {
+        // Only include the model families tokensave meters: Anthropic Claude
+        // plus the OpenAI families the Codex CLI reports. Everything else is
+        // skipped so the prefix matcher in `lookup` stays unambiguous.
+        if !is_metered_model(model_id) {
             continue;
         }
 
-        // Skip Bedrock/Vertex provider-prefixed entries -- we want the
-        // canonical model names that match what Claude Code reports.
+        // Skip Bedrock/Vertex/Azure provider-prefixed entries -- we want the
+        // canonical model names that match what the CLIs report.
         if let Some(provider) = entry.get("litellm_provider").and_then(|v| v.as_str()) {
-            if provider.starts_with("bedrock") || provider.starts_with("vertex") {
+            if provider.starts_with("bedrock")
+                || provider.starts_with("vertex")
+                || provider.starts_with("azure")
+            {
                 continue;
             }
         }
@@ -309,7 +338,45 @@ mod tests {
 
     #[test]
     fn test_lookup_unknown() {
-        assert!(lookup("gpt-4o-2024-05-13").is_none());
+        // A model outside every metered family stays unpriced regardless of any
+        // cached pricing file on the host.
+        assert!(lookup("totally-made-up-model-zzz-2099").is_none());
+    }
+
+    #[test]
+    fn unknown_model_is_explicitly_unpriced_not_free() {
+        // Regression: a new or routed model must be reported as unpriced so
+        // callers can show an explicit unpriced state, never a silent $0.00
+        // that reads as a free turn.
+        let unknown = "some-brand-new-model-2099";
+        assert!(!is_priced(unknown));
+        assert!(lookup(unknown).is_none());
+        // cost_of_turn collapses unknown to 0.0, which is exactly why is_priced
+        // must gate whether that 0.0 means "free" or "unknown".
+        assert!(cost_of_turn(unknown, 1_000_000, 1_000_000, 0, 0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn parse_litellm_keeps_openai_codex_families() {
+        // The Codex CLI reports gpt-* models; they must survive the filter now,
+        // while unrelated providers are still dropped.
+        let json = r#"{
+            "gpt-5-mini": {
+                "input_cost_per_token": 1e-07,
+                "output_cost_per_token": 4e-07,
+                "litellm_provider": "openai",
+                "mode": "chat"
+            },
+            "some-random-llm": {
+                "input_cost_per_token": 1e-06,
+                "output_cost_per_token": 1e-06,
+                "litellm_provider": "other",
+                "mode": "chat"
+            }
+        }"#;
+        let table = parse_litellm_json(json).unwrap();
+        assert!(table.contains_key("gpt-5-mini"));
+        assert!(!table.contains_key("some-random-llm"));
     }
 
     #[test]
@@ -363,9 +430,10 @@ mod tests {
             }
         }"#;
         let table = parse_litellm_json(json).unwrap();
-        // Only claude model should be included
-        assert_eq!(table.len(), 1);
+        // Both claude and gpt-4o are metered families and should be included.
+        assert_eq!(table.len(), 2);
         assert!(table.contains_key("claude-sonnet-4-6-20250514"));
+        assert!(table.contains_key("gpt-4o"));
         let p = &table["claude-sonnet-4-6-20250514"];
         assert!((p.input_per_mtok - 3.0).abs() < 0.001);
         assert!((p.output_per_mtok - 15.0).abs() < 0.001);

@@ -268,7 +268,14 @@ fn lookup_in_table<'a>(
     // Fall back to longest prefix match
     let mut best: Option<(&str, &ModelPricing)> = None;
     for (key, pricing) in table {
-        if model.starts_with(key.as_str()) && best.is_none_or(|(bp, _)| key.len() > bp.len()) {
+        let has_delimited_suffix = model
+            .strip_prefix(key.as_str())
+            .and_then(|suffix| suffix.chars().next())
+            .is_none_or(|ch| !ch.is_ascii_alphanumeric());
+        if model.starts_with(key.as_str())
+            && has_delimited_suffix
+            && best.is_none_or(|(bp, _)| key.len() > bp.len())
+        {
             best = Some((key.as_str(), pricing));
         }
     }
@@ -569,6 +576,15 @@ mod tests {
                     cache_read_per_mtok: 0.0,
                 },
             ),
+            (
+                "o1".to_string(),
+                ModelPricing {
+                    input_per_mtok: 3.0,
+                    output_per_mtok: 0.0,
+                    cache_write_per_mtok: 0.0,
+                    cache_read_per_mtok: 0.0,
+                },
+            ),
         ]);
         assert!(
             (lookup_in_table(&table, "gpt-5-mini-2025")
@@ -578,5 +594,7 @@ mod tests {
                 .abs()
                 < f64::EPSILON
         );
+        assert!(lookup_in_table(&table, "gpt-50").is_none());
+        assert!(lookup_in_table(&table, "o100").is_none());
     }
 }

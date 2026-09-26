@@ -101,7 +101,8 @@ fn embedded_table() -> HashMap<String, ModelPricing> {
 }
 
 /// Model families tokensave prices: Anthropic Claude plus the `OpenAI` families
-/// the Codex CLI reports (`gpt-*`, `o1*`, `o3*`, `o4*`, `codex*`).
+/// the Codex CLI reports (`gpt-*`, `o1`/`o1-*`, `o3`/`o3-*`, `o4`/`o4-*`,
+/// `codex`/`codex-*`).
 ///
 /// New families are added here. A model outside these families is left unpriced
 /// on purpose rather than guessed at.

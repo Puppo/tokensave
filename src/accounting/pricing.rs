@@ -127,7 +127,7 @@ pub fn is_priced(model: &str) -> bool {
 /// Parse `LiteLLM`'s JSON format into our pricing table.
 ///
 /// `LiteLLM` uses per-token costs (e.g. `3e-06` for $3/MTok). We filter to
-/// Claude models only and convert to per-MTok.
+/// the metered model families and convert to per-MTok.
 fn parse_litellm_json(json: &str) -> Option<HashMap<String, ModelPricing>> {
     let parsed: serde_json::Value = serde_json::from_str(json).ok()?;
     let obj = parsed.as_object()?;
@@ -351,9 +351,11 @@ mod tests {
         let unknown = "some-brand-new-model-2099";
         assert!(!is_priced(unknown));
         assert!(lookup(unknown).is_none());
+        assert!(is_priced("claude-opus-4"));
         // cost_of_turn collapses unknown to 0.0, which is exactly why is_priced
         // must gate whether that 0.0 means "free" or "unknown".
         assert!(cost_of_turn(unknown, 1_000_000, 1_000_000, 0, 0).abs() < f64::EPSILON);
+        assert!(cost_of_turn("claude-opus-4", 0, 0, 0, 0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -467,5 +469,33 @@ mod tests {
     fn test_parse_litellm_invalid() {
         assert!(parse_litellm_json("not json").is_none());
         assert!(parse_litellm_json("{}").is_none()); // empty = no claude models
+    }
+
+    #[test]
+    fn parse_litellm_keeps_all_metered_families_and_excludes_provider_duplicates() {
+        let json = r#"{
+            "claude-sonnet-4": {"input_cost_per_token": 1e-06, "output_cost_per_token": 2e-06, "litellm_provider": "anthropic"},
+            "gpt-5": {"input_cost_per_token": 1e-06, "output_cost_per_token": 2e-06, "litellm_provider": "openai"},
+            "o1": {"input_cost_per_token": 1e-06, "output_cost_per_token": 2e-06, "litellm_provider": "openai"},
+            "o3": {"input_cost_per_token": 1e-06, "output_cost_per_token": 2e-06, "litellm_provider": "openai"},
+            "o4": {"input_cost_per_token": 1e-06, "output_cost_per_token": 2e-06, "litellm_provider": "openai"},
+            "codex-mini": {"input_cost_per_token": 1e-06, "output_cost_per_token": 2e-06, "litellm_provider": "openai"},
+            "bedrock/claude-sonnet-4": {"input_cost_per_token": 1e-06, "output_cost_per_token": 2e-06, "litellm_provider": "bedrock_converse"},
+            "vertex/gpt-5": {"input_cost_per_token": 1e-06, "output_cost_per_token": 2e-06, "litellm_provider": "vertex_ai"},
+            "azure/o3": {"input_cost_per_token": 1e-06, "output_cost_per_token": 2e-06, "litellm_provider": "azure"},
+            "unrelated-model": {"input_cost_per_token": 1e-06, "output_cost_per_token": 2e-06, "litellm_provider": "other"}
+        }"#;
+        let table = parse_litellm_json(json).unwrap();
+        for model in ["claude-sonnet-4", "gpt-5", "o1", "o3", "o4", "codex-mini"] {
+            assert!(table.contains_key(model), "missing {model}");
+        }
+        for model in [
+            "bedrock/claude-sonnet-4",
+            "vertex/gpt-5",
+            "azure/o3",
+            "unrelated-model",
+        ] {
+            assert!(!table.contains_key(model), "unexpected {model}");
+        }
     }
 }

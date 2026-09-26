@@ -103,15 +103,26 @@ fn embedded_table() -> HashMap<String, ModelPricing> {
 /// Model families tokensave prices: Anthropic Claude plus the `OpenAI` families
 /// the Codex CLI reports (`gpt-*`, `o1*`, `o3*`, `o4*`, `codex*`).
 ///
-/// New families are added here; see `.overlay/notes/adding-a-model.md`. A model
-/// outside these families is left unpriced on purpose rather than guessed at.
+/// New families are added here. A model outside these families is left unpriced
+/// on purpose rather than guessed at.
+fn has_family_prefix(model_id: &str, family: &str) -> bool {
+    model_id == family || model_id.starts_with(&format!("{family}-"))
+}
+
 fn is_metered_model(model_id: &str) -> bool {
-    model_id.contains("claude")
+    has_family_prefix(model_id, "claude")
         || model_id.starts_with("gpt-")
-        || model_id.starts_with("o1")
-        || model_id.starts_with("o3")
-        || model_id.starts_with("o4")
-        || model_id.contains("codex")
+        || has_family_prefix(model_id, "o1")
+        || has_family_prefix(model_id, "o3")
+        || has_family_prefix(model_id, "o4")
+        || has_family_prefix(model_id, "codex")
+}
+
+fn is_provider_prefixed_model(model_id: &str) -> bool {
+    matches!(
+        model_id.split_once('/').map(|(provider, _)| provider),
+        Some("bedrock" | "vertex" | "azure")
+    )
 }
 
 /// Whether tokensave has a price for `model`.
@@ -143,7 +154,11 @@ fn parse_litellm_json(json: &str) -> Option<HashMap<String, ModelPricing>> {
         }
 
         // Skip Bedrock/Vertex/Azure provider-prefixed entries -- we want the
-        // canonical model names that match what the CLIs report.
+        // canonical model names that match what the CLIs report. Check both
+        // the model ID and metadata because LiteLLM entries are not uniform.
+        if is_provider_prefixed_model(model_id) {
+            continue;
+        }
         if let Some(provider) = entry.get("litellm_provider").and_then(|v| v.as_str()) {
             if provider.starts_with("bedrock")
                 || provider.starts_with("vertex")
@@ -170,8 +185,22 @@ fn parse_litellm_json(json: &str) -> Option<HashMap<String, ModelPricing>> {
             .and_then(serde_json::Value::as_f64)
             .unwrap_or(0.0);
 
-        // Skip entries with no pricing data
-        if input == 0.0 && output == 0.0 {
+        // Keep explicit zero-cost entries so known free models remain distinct
+        // from unknown models. Reject entries with no numeric pricing fields.
+        let has_pricing = [
+            "input_cost_per_token",
+            "output_cost_per_token",
+            "cache_creation_input_token_cost",
+            "cache_read_input_token_cost",
+        ]
+        .iter()
+        .any(|field| {
+            entry
+                .get(*field)
+                .and_then(serde_json::Value::as_f64)
+                .is_some()
+        });
+        if !has_pricing {
             continue;
         }
 
@@ -224,8 +253,13 @@ fn get_table() -> &'static HashMap<String, ModelPricing> {
 /// Look up pricing for a model ID. Matches the longest prefix.
 /// Returns `None` for unknown models.
 pub fn lookup(model: &str) -> Option<&'static ModelPricing> {
-    let table = get_table();
+    lookup_in_table(get_table(), model)
+}
 
+fn lookup_in_table<'a>(
+    table: &'a HashMap<String, ModelPricing>,
+    model: &str,
+) -> Option<&'a ModelPricing> {
     // Try exact match first
     if let Some(p) = table.get(model) {
         return Some(p);
@@ -480,22 +514,69 @@ mod tests {
             "o3": {"input_cost_per_token": 1e-06, "output_cost_per_token": 2e-06, "litellm_provider": "openai"},
             "o4": {"input_cost_per_token": 1e-06, "output_cost_per_token": 2e-06, "litellm_provider": "openai"},
             "codex-mini": {"input_cost_per_token": 1e-06, "output_cost_per_token": 2e-06, "litellm_provider": "openai"},
+            "gpt-5-free": {"input_cost_per_token": 0.0, "output_cost_per_token": 0.0, "litellm_provider": "openai"},
+            "gpt-5-no-price": {"litellm_provider": "openai"},
             "bedrock/claude-sonnet-4": {"input_cost_per_token": 1e-06, "output_cost_per_token": 2e-06, "litellm_provider": "bedrock_converse"},
             "vertex/gpt-5": {"input_cost_per_token": 1e-06, "output_cost_per_token": 2e-06, "litellm_provider": "vertex_ai"},
             "azure/o3": {"input_cost_per_token": 1e-06, "output_cost_per_token": 2e-06, "litellm_provider": "azure"},
+            "vertex/gpt-5-no-metadata": {"input_cost_per_token": 1e-06, "output_cost_per_token": 2e-06},
+            "azure/o3-nonmatching-metadata": {"input_cost_per_token": 1e-06, "output_cost_per_token": 2e-06, "litellm_provider": "openai"},
+            "not-claude-model": {"input_cost_per_token": 1e-06, "output_cost_per_token": 2e-06, "litellm_provider": "anthropic"},
+            "autocodex": {"input_cost_per_token": 1e-06, "output_cost_per_token": 2e-06, "litellm_provider": "openai"},
+            "o100": {"input_cost_per_token": 1e-06, "output_cost_per_token": 2e-06, "litellm_provider": "openai"},
             "unrelated-model": {"input_cost_per_token": 1e-06, "output_cost_per_token": 2e-06, "litellm_provider": "other"}
         }"#;
         let table = parse_litellm_json(json).unwrap();
         for model in ["claude-sonnet-4", "gpt-5", "o1", "o3", "o4", "codex-mini"] {
             assert!(table.contains_key(model), "missing {model}");
         }
+        assert!(table.contains_key("gpt-5-free"));
+        assert!(table["gpt-5-free"].input_per_mtok.abs() < f64::EPSILON);
+        assert!(!table.contains_key("gpt-5-no-price"));
         for model in [
             "bedrock/claude-sonnet-4",
             "vertex/gpt-5",
             "azure/o3",
+            "vertex/gpt-5-no-metadata",
+            "azure/o3-nonmatching-metadata",
+            "not-claude-model",
+            "autocodex",
+            "o100",
             "unrelated-model",
         ] {
             assert!(!table.contains_key(model), "unexpected {model}");
         }
+    }
+
+    #[test]
+    fn lookup_prefers_the_longest_matching_prefix() {
+        let table = HashMap::from([
+            (
+                "gpt-5".to_string(),
+                ModelPricing {
+                    input_per_mtok: 1.0,
+                    output_per_mtok: 0.0,
+                    cache_write_per_mtok: 0.0,
+                    cache_read_per_mtok: 0.0,
+                },
+            ),
+            (
+                "gpt-5-mini".to_string(),
+                ModelPricing {
+                    input_per_mtok: 2.0,
+                    output_per_mtok: 0.0,
+                    cache_write_per_mtok: 0.0,
+                    cache_read_per_mtok: 0.0,
+                },
+            ),
+        ]);
+        assert!(
+            (lookup_in_table(&table, "gpt-5-mini-2025")
+                .unwrap()
+                .input_per_mtok
+                - 2.0)
+                .abs()
+                < f64::EPSILON
+        );
     }
 }

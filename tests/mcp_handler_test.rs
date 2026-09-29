@@ -3339,6 +3339,62 @@ pub fn unrelated(x: i32) -> i32 {
     assert_eq!(parsed2["pair_count"], parsed["pair_count"]);
 }
 
+/// Issue #599: GDScript functions had no fingerprint language, so every one
+/// was reported as `skipped_for_size` and no GDScript pair was ever found.
+#[cfg(feature = "lang-gdscript")]
+#[tokio::test]
+async fn test_redundancy_scans_gdscript() {
+    let dir = TempDir::new().unwrap();
+    let project = dir.path();
+    fs::write(
+        project.join("twins.gd"),
+        "class_name Twins\nextends RefCounted\n\n\n\
+func first(values: Array[int]) -> int:\n\
+\tvar total := 0\n\
+\tfor value: int in values:\n\
+\t\tif value > 0:\n\
+\t\t\ttotal += value * 2\n\
+\t\telse:\n\
+\t\t\ttotal -= value\n\
+\treturn total\n\n\n\
+func second(values: Array[int]) -> int:\n\
+\tvar total := 0\n\
+\tfor value: int in values:\n\
+\t\tif value > 0:\n\
+\t\t\ttotal += value * 2\n\
+\t\telse:\n\
+\t\t\ttotal -= value\n\
+\treturn total\n",
+    )
+    .unwrap();
+
+    let cg = TokenSave::init(project).await.unwrap();
+    cg.index_all().await.unwrap();
+    let result = handle_tool_call(
+        &cg,
+        "tokensave_redundancy",
+        json!({ "min_lines": 1, "similarity_threshold": 0.5 }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&result.value);
+    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+
+    assert!(parsed["scanned"].as_u64().unwrap_or(0) >= 2, "{text}");
+    assert_eq!(parsed["skipped_unsupported_language"], 0, "{text}");
+    let pairs = parsed["pairs"].as_array().expect("pairs array");
+    let found = pairs.iter().any(|p| {
+        let names = [
+            p["a"]["name"].as_str().unwrap_or(""),
+            p["b"]["name"].as_str().unwrap_or(""),
+        ];
+        names.contains(&"first") && names.contains(&"second")
+    });
+    assert!(found, "expected first/second pair: {text}");
+}
+
 /// Issue #80: `tokensave_runtime` must surface process + DB telemetry so
 /// users hitting unexpected CPU/RAM can capture a structured snapshot
 /// without leaving the chat session.

@@ -239,6 +239,7 @@ fn lang_from_path(path: &str) -> &'static str {
         "zig" => "zig",
         "proto" => "proto",
         "vhd" | "vhdl" => "vhdl",
+        "v" | "vh" | "sv" | "svh" => "systemverilog",
         _ => "unknown",
     }
 }

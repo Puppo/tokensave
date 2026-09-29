@@ -5,6 +5,44 @@ use crate::db::Database;
 use crate::errors::{Result, TokenSaveError};
 use crate::types::*;
 
+/// Godot virtual callbacks that the engine invokes on `Object`, `Node`,
+/// `CanvasItem`, `Control`, `Resource` and the physics bodies. A `.gd`
+/// method with one of these names has no caller in project code (#598).
+const GODOT_ENGINE_VIRTUALS: &[&str] = &[
+    "_init",
+    "_static_init",
+    "_ready",
+    "_enter_tree",
+    "_exit_tree",
+    "_process",
+    "_physics_process",
+    "_input",
+    "_unhandled_input",
+    "_unhandled_key_input",
+    "_shortcut_input",
+    "_gui_input",
+    "_notification",
+    "_draw",
+    "_to_string",
+    "_get",
+    "_set",
+    "_get_property_list",
+    "_validate_property",
+    "_property_can_revert",
+    "_property_get_revert",
+    "_get_configuration_warnings",
+    "_integrate_forces",
+    "_has_point",
+    "_get_minimum_size",
+    "_make_custom_tooltip",
+    "_get_drag_data",
+    "_can_drop_data",
+    "_drop_data",
+    "_structured_text_parser",
+    "_setup_local_to_scene",
+    "_run",
+];
+
 /// Metrics describing the connectivity and structure around a single node.
 #[derive(Debug, Clone)]
 pub struct NodeMetrics {
@@ -257,6 +295,11 @@ impl<'a> GraphQueryManager<'a> {
         let marker_ids = self.db.collect_test_marker_ids().await?;
         self.db.populate_test_marker_temp_table(&marker_ids).await?;
         self.db.populate_test_annotated_targets_temp_table().await?;
+        let godot_virtuals = GODOT_ENGINE_VIRTUALS
+            .iter()
+            .map(|n| format!("'{n}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
 
         let sql = format!(
             "SELECT id, kind, name, qualified_name, file_path, start_line, end_line,
@@ -273,6 +316,10 @@ impl<'a> GraphQueryManager<'a> {
              -- Rust trait-impl methods are exempt. Scoped to `.go` so a callable
              -- function named `init` in another language is still checked (#346).
              AND NOT (name = 'init' AND file_path LIKE '%.go')
+             -- Godot engine virtuals (`_ready`, `_process`, ...) are called by the
+             -- engine, never by project code, so they have no incoming edge either.
+             -- Scoped to `.gd` for the same reason as Go `init` (#598).
+             AND NOT (file_path LIKE '%.gd' AND name IN ({godot_virtuals}))
              {visibility_filter}
              {kind_filter}
              {trait_impl_filter}

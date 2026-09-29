@@ -59,7 +59,7 @@ pub(super) async fn handle_redundancy(
     let total_candidates = nodes.len();
 
     // 2. Ensure each has a fresh fingerprint (cache by source hash).
-    let fingerprints = ensure_fingerprints(cg, &nodes).await?;
+    let (fingerprints, unsupported) = ensure_fingerprints(cg, &nodes).await?;
     let scanned = fingerprints.len();
 
     // 3. Bucket by token count to keep pairwise comparison sub-quadratic.
@@ -69,7 +69,10 @@ pub(super) async fn handle_redundancy(
     let output = json!({
         "candidates": total_candidates,
         "scanned": scanned,
-        "skipped_for_size": total_candidates.saturating_sub(scanned),
+        "skipped_for_size": total_candidates.saturating_sub(scanned + unsupported),
+        // Counted apart from size, or a language with no fingerprint support reads as a
+        // project whose every function is too small (#599).
+        "skipped_unsupported_language": unsupported,
         "pair_count": pair_count,
         "pairs": pairs,
         "ranked_by": "similarity desc",
@@ -124,11 +127,12 @@ async fn collect_candidates(
 /// Returns a map from `node_id` to its fingerprint. Reuses any cached row
 /// whose stored `source_hash` matches the live file content for that
 /// node's body; otherwise re-parses the file once, computes fingerprints
-/// for all candidate nodes in that file, and persists them.
+/// for all candidate nodes in that file, and persists them. The second value
+/// counts candidates skipped because their language has no fingerprint support.
 async fn ensure_fingerprints(
     cg: &TokenSave,
     candidates: &[Node],
-) -> Result<HashMap<String, Fingerprint>> {
+) -> Result<(HashMap<String, Fingerprint>, usize)> {
     let registry = crate::extraction::LanguageRegistry::new();
     let project_root = cg.project_root().to_path_buf();
 
@@ -139,6 +143,7 @@ async fn ensure_fingerprints(
     }
 
     let mut out: HashMap<String, Fingerprint> = HashMap::new();
+    let mut unsupported = 0usize;
 
     for (file_path, file_nodes) in by_file {
         // Deleted between sync and this call -> skip. Read first: the source, not the extension,
@@ -159,6 +164,7 @@ async fn ensure_fingerprints(
         };
         let lang_key = extractor_to_language_key(extractor.language_name());
         let Some(lang_key) = lang_key else {
+            unsupported += file_nodes.len();
             continue;
         };
         // Same bytes the extractor parsed, or a stored coordinate lands in a different tree.
@@ -253,7 +259,7 @@ async fn ensure_fingerprints(
         }
     }
 
-    Ok(out)
+    Ok((out, unsupported))
 }
 
 /// Map `extractor.language_name()` (e.g. "Rust", "TypeScript") to the
@@ -291,6 +297,17 @@ fn extractor_to_language_key(name: &str) -> Option<&'static str> {
         "R" => "r",
         "Julia" => "julia",
         "Nix" => "nix",
+        "GDScript" => "gdscript",
+        "ActionScript" => "actionscript",
+        "Objective-C" => "objc",
+        "Fortran" => "fortran",
+        "COBOL" => "cobol",
+        "Pascal" => "pascal",
+        "VB.NET" => "vbnet",
+        "PowerShell" => "powershell",
+        "GLSL" => "glsl",
+        "HLSL" => "hlsl",
+        "WGSL" => "wgsl",
         _ => return None,
     })
 }
@@ -613,7 +630,7 @@ mod tests {
             cg.db().insert_node(n).await.unwrap();
         }
 
-        let fingerprints = ensure_fingerprints(&cg, &nodes).await.unwrap();
+        let fingerprints = ensure_fingerprints(&cg, &nodes).await.unwrap().0;
 
         // Both nodes produced fingerprints.
         assert_eq!(fingerprints.len(), 2);
@@ -664,7 +681,7 @@ mod tests {
         cg.db().insert_node(&nodes[0]).await.unwrap();
 
         // First call — parse and store real fingerprint.
-        let fp1 = ensure_fingerprints(&cg, &nodes).await.unwrap();
+        let fp1 = ensure_fingerprints(&cg, &nodes).await.unwrap().0;
         let real_hash = fp1["node:add"].ast_hash.clone();
         assert!(!real_hash.is_empty());
 
@@ -688,7 +705,7 @@ mod tests {
             .unwrap();
 
         // Second call — must return the FAKE ast_hash, proving cache hit.
-        let fp2 = ensure_fingerprints(&cg, &nodes).await.unwrap();
+        let fp2 = ensure_fingerprints(&cg, &nodes).await.unwrap().0;
         assert_eq!(
             fp2["node:add"].ast_hash, "cached-hit-0000000000",
             "second call must return cached (fake) hash, not recompute"
@@ -712,7 +729,7 @@ mod tests {
         cg.db().insert_node(&nodes[0]).await.unwrap();
 
         // First call — compute and store real fingerprint.
-        let fp1 = ensure_fingerprints(&cg, &nodes).await.unwrap();
+        let fp1 = ensure_fingerprints(&cg, &nodes).await.unwrap().0;
         let real_body_tokens = fp1["node:small"].body_tokens;
         let real_ast_hash = fp1["node:small"].ast_hash.clone();
 
@@ -750,7 +767,7 @@ mod tests {
 
         // Second call — must detect poison and recompute, NOT return the
         // poisoned row's fake ast_hash.
-        let fp2 = ensure_fingerprints(&cg, &nodes).await.unwrap();
+        let fp2 = ensure_fingerprints(&cg, &nodes).await.unwrap().0;
         assert_ne!(
             fp2["node:small"].ast_hash, "poison-ast-0000000000",
             "poisoned row must be rejected; ast_hash must be recomputed"
@@ -843,7 +860,7 @@ mod tests {
         );
 
         // Run ensure_fingerprints — must detect poison and recompute both.
-        let fingerprints = ensure_fingerprints(&cg, &nodes).await.unwrap();
+        let fingerprints = ensure_fingerprints(&cg, &nodes).await.unwrap().0;
 
         let add_fp = &fingerprints["node:add"];
         let sub_fp = &fingerprints["node:sub"];
@@ -905,7 +922,7 @@ mod tests {
         }
 
         // First call — parse and store fingerprints for both nodes.
-        let fp1 = ensure_fingerprints(&cg, &nodes).await.unwrap();
+        let fp1 = ensure_fingerprints(&cg, &nodes).await.unwrap().0;
         assert_eq!(fp1.len(), 2);
 
         let a_fp = &fp1["node:a"];
@@ -947,7 +964,7 @@ mod tests {
         cg.db().upsert_fingerprint("node:b", &fake_b).await.unwrap();
 
         // Second call — must return the fake ast_hashes (cache hit).
-        let fp2 = ensure_fingerprints(&cg, &nodes).await.unwrap();
+        let fp2 = ensure_fingerprints(&cg, &nodes).await.unwrap().0;
         assert_eq!(
             fp2["node:a"].ast_hash, "cache-hit-a-deadbeef",
             "second invocation for node:a must be a cache hit"
@@ -977,7 +994,7 @@ mod tests {
         cg.db().insert_node(&nodes[0]).await.unwrap();
 
         // Run through the production path.
-        let fingerprints = ensure_fingerprints(&cg, &nodes).await.unwrap();
+        let fingerprints = ensure_fingerprints(&cg, &nodes).await.unwrap().0;
         let fp = &fingerprints["node:f"];
 
         // Compute the expected fingerprint from the function_item child

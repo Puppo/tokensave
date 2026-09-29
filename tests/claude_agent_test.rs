@@ -282,8 +282,17 @@ fn test_install_creates_managed_rules_file() {
         "managed rules file should mention tokensave tools"
     );
     assert!(
-        rules.contains("NEVER use Agent(subagent_type=Explore)"),
-        "managed rules file should contain the no-explore-agent rule"
+        rules.contains("do not spawn an Explore agent (or any agent) for code")
+            && rules.contains("unless the user asks for one"),
+        "managed rules file should contain the single no-explore-agent rule (#604)"
+    );
+    assert!(
+        rules.contains("### When the hook denies a search"),
+        "managed rules file should tell the agent what a hook denial means (#604)"
+    );
+    assert!(
+        !rules.contains("No exceptions"),
+        "the absolute wording contradicted the explore-agent paragraph (#604)"
     );
     assert!(
         rules.contains("When you spawn an Explore agent"),

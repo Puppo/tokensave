@@ -225,7 +225,9 @@ Tokensave works as an MCP (Model Context Protocol) server. AI coding agents conn
 tokensave install
 ```
 
-This is the default. It registers the MCP server in `~/.claude/settings.json`, grants tool permissions so Claude doesn't have to ask you every time, installs a `PreToolUse` hook that redirects Claude away from spawning expensive Explore agents and away from symbol-shaped grep/rg searches that a tokensave tool answers more cheaply, and adds prompt rules to `~/.claude/CLAUDE.md` that tell Claude to prefer tokensave tools.
+This is the default. It registers the MCP server in `~/.claude/settings.json`, grants tool permissions so Claude doesn't have to ask you every time, installs a `PreToolUse` hook that redirects Claude away from spawning expensive Explore agents and away from symbol-shaped grep/rg searches that a tokensave tool answers more cheaply, and writes prompt rules to `~/.claude/rules/tokensave.md` that tell Claude to prefer tokensave tools.
+
+That rules file is rewritten on install and on upgrade so improvements to the rules reach you. To add rules of your own, write them below its last line (the `tokensave-managed rules end here` marker): text there is kept on every refresh. To keep the whole file as yours, for example a team-maintained version, set `manage_rules = false` in `~/.tokensave/config.toml`. Install, reinstall, the upgrade resync and uninstall then leave every tokensave rules file alone, and `doctor` reports it as user-managed. `TOKENSAVE_MANAGE_RULES=0` does the same for one run.
 
 By default the tool grant is an explicit list (one `permissions.allow` entry per tool). Pass `--wildcard-permissions` to grant them via a single compact `mcp__tokensave__*` entry instead — both forms are fully honored by Claude Code, so this is purely a preference. The choice is remembered in `~/.tokensave/config.toml` (`wildcard_permissions`) for global installs; pass `--explicit-permissions` to switch back.
 
@@ -829,6 +831,12 @@ tokensave affected src/lib.rs --quiet            # just file paths, no decoratio
 
 When running as an MCP server, tokensave exposes more than 80 tools that AI agents can call. The most commonly used are grouped below by purpose; run `tokensave tool` for the complete list with one-line descriptions.
 
+### Listing fewer tools
+
+A client sends the schema of every listed tool on every turn, before any tool is called, so the full list costs context whether or not the tools are used. `"tools": "core"` in `.tokensave/config.json`, or `TOKENSAVE_TOOLS=core`, lists 11 tools instead: `context`, `search`, `status`, `read`, `body`, `files`, `callers`, `callees`, `impact`, `str_replace` and `multi_str_replace`. With the core list, `tokensave_more` lists the tools of one area (`analysis`, `edit`, `git`, `memory`, `navigate`, or `all`) for the rest of the session. The server announces the change, so the client fetches the list again.
+
+The setting chooses what is listed, not what runs: a tool that is not listed still answers a call, so permission lists and hooks keep working. The default is `"full"`.
+
 ### Core exploration
 
 | Tool | What it does |
@@ -1093,7 +1101,7 @@ Dart, Pascal, PHP, Ruby, Bash, Protobuf, PowerShell, Nix, VB.NET
 
 Everything: legacy, niche, shader, and document languages.
 
-ActionScript, Lua, Zig, Objective-C, Perl, Batch/CMD, Fortran, COBOL, MS BASIC 2.0, GW-BASIC, QBasic, QuickBASIC 4.5, Dockerfile, GLSL, WGSL, HLSL, Metal, Markdown, R, SQL, Julia, Haskell, OCaml, Clojure, Erlang, Elixir, F#, F*, Quint, TOML, Lean
+ActionScript, Lua, Zig, Objective-C, Perl, Batch/CMD, Fortran, COBOL, MS BASIC 2.0, GW-BASIC, QBasic, QuickBASIC 4.5, Dockerfile, GLSL, WGSL, HLSL, Metal, Markdown, R, SQL, Julia, Haskell, OCaml, Clojure, Erlang, Elixir, F#, F*, Quint, TOML, Lean, SystemVerilog, VHDL
 
 ### Mixing individual languages
 
@@ -1330,6 +1338,7 @@ upload_enabled = true        # set to false to stop uploading
 watcher_debounce = "2s"      # inert; left over from the watcher removed in 6.1.1
 extraction_timeout_secs = 60 # per-file extraction timeout
 wildcard_permissions = false # true = grant Claude Code tools via one "mcp__tokensave__*" entry
+manage_rules = true          # false = leave ~/.claude/rules/tokensave.md and other rules files to you
 ```
 
 `state.toml` holds everything else (`pending_upload`, `last_upload_at`,

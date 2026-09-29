@@ -55,10 +55,20 @@ const LEGACY_MANAGED_FILE_MARKER: &str =
 /// `manage_rules = false` in `~/.tokensave/config.toml`, or a falsy
 /// `TOKENSAVE_MANAGE_RULES`, hands them to the user (#603).
 pub fn rules_management_enabled() -> bool {
-    crate::config::env_bool_override(
-        "TOKENSAVE_MANAGE_RULES",
-        crate::user_config::UserConfig::load().manage_rules,
-    )
+    crate::config::env_bool_override("TOKENSAVE_MANAGE_RULES", manage_rules_setting())
+}
+
+/// `manage_rules` from the `config.toml` under the same home the rules files
+/// are written to. `UserConfig::load` finds home another way on Windows (the
+/// known-folder API, not `HOME`/`USERPROFILE`), and a setting read from one
+/// home must not decide about a file in another (the split behind #575).
+fn manage_rules_setting() -> bool {
+    let from_agent_home = crate::agents::home_dir()
+        .map(|home| home.join(".tokensave").join("config.toml"))
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|contents| contents.parse::<toml::Table>().ok())
+        .and_then(|table| table.get("manage_rules").and_then(toml::Value::as_bool));
+    from_agent_home.unwrap_or_else(|| crate::user_config::UserConfig::load().manage_rules)
 }
 
 /// Split a managed rules file at its provenance marker into tokensave's

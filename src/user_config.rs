@@ -121,6 +121,14 @@ pub struct UserConfig {
     #[serde(default)]
     pub wildcard_permissions: bool,
 
+    /// When false, `install`, `reinstall`, the upgrade resync and `uninstall`
+    /// leave tokensave's managed rules files (e.g. `~/.claude/rules/tokensave.md`)
+    /// alone, and `doctor` reports them as user-managed instead of drifted, so
+    /// a customised file survives upgrades (#603). `TOKENSAVE_MANAGE_RULES`
+    /// overrides it per run.
+    #[serde(default = "default_true")]
+    pub manage_rules: bool,
+
     /// Snapshot of the config-owned fields (see `ConfigFile`) as last seen
     /// on disk by this instance -- either at `load()` time, or as of its own
     /// most recent successful `save()`. `save()` compares against this to
@@ -195,6 +203,7 @@ impl Default for UserConfig {
             previous_version: String::new(),
             extraction_timeout_secs: default_extraction_timeout_secs(),
             wildcard_permissions: false,
+            manage_rules: true,
             loaded_config: Mutex::new(None),
             loaded_state: Mutex::new(None),
             loaded_legacy_state: AtomicBool::new(false),
@@ -214,6 +223,8 @@ pub(crate) struct ConfigFile {
     extraction_timeout_secs: u64,
     #[serde(default)]
     wildcard_permissions: bool,
+    #[serde(default = "default_true")]
+    manage_rules: bool,
 }
 
 impl ConfigFile {
@@ -224,6 +235,7 @@ impl ConfigFile {
             watcher_debounce: c.watcher_debounce.clone(),
             extraction_timeout_secs: c.extraction_timeout_secs,
             wildcard_permissions: c.wildcard_permissions,
+            manage_rules: c.manage_rules,
         }
     }
 }
@@ -1008,7 +1020,8 @@ impl UserConfig {
         let changed = self.upload_enabled != base.upload_enabled
             || self.watcher_debounce != base.watcher_debounce
             || self.extraction_timeout_secs != base.extraction_timeout_secs
-            || self.wildcard_permissions != base.wildcard_permissions;
+            || self.wildcard_permissions != base.wildcard_permissions
+            || self.manage_rules != base.manage_rules;
         if !changed && !self.loaded_legacy_state.load(Ordering::Relaxed) {
             return Ok(None);
         }
@@ -1042,6 +1055,11 @@ impl UserConfig {
                 on_disk.wildcard_permissions
             } else {
                 self.wildcard_permissions
+            },
+            manage_rules: if self.manage_rules == base.manage_rules {
+                on_disk.manage_rules
+            } else {
+                self.manage_rules
             },
         }))
     }
@@ -1166,6 +1184,7 @@ mod tests {
             previous_version: "1.2.1".to_string(),
             extraction_timeout_secs: 30,
             wildcard_permissions: true,
+            manage_rules: false,
             loaded_config: Mutex::new(None),
             loaded_state: Mutex::new(None),
             loaded_legacy_state: AtomicBool::new(false),

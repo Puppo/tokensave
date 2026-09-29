@@ -7,6 +7,9 @@ and this project uses [maintenance-based versioning](TOKENSAVE-VERSIONING.md), n
 
 ## [Unreleased]
 
+### Added
+- Ruby class and module declarations that reopen the same constant are linked across files, so the graph keeps their separate definitions connected after incremental sync.
+
 
 ## [7.13.0] - 2026-09-29
 

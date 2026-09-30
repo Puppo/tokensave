@@ -7,6 +7,8 @@ and this project uses [maintenance-based versioning](TOKENSAVE-VERSIONING.md), n
 
 ## [Unreleased]
 
+### Added
+- `.rake` files are now indexed as Ruby source, including Ruby cross-file resolution and language reporting.
 
 ## [7.13.0] - 2026-09-29
 

@@ -85,6 +85,22 @@ fn test_markdown_extracts_code_links() {
 }
 
 #[test]
+fn test_markdown_extracts_rake_link() {
+    let target = "lib/tasks/sample.rake";
+    let source = format!("See [tasks]({target}) for details.");
+    let result = MarkdownExtractor.extract("README.md", &source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let target_id = generate_node_id(target, &NodeKind::File, target, 0);
+    let uses_edges: Vec<_> = result
+        .edges
+        .iter()
+        .filter(|edge| edge.kind == EdgeKind::Uses)
+        .collect();
+    assert_eq!(uses_edges.len(), 1);
+    assert_eq!(uses_edges[0].target, target_id);
+}
+
+#[test]
 fn test_markdown_skips_external_links() {
     let source = "Check [Google](https://google.com) for more.";
     let result = MarkdownExtractor.extract("README.md", source);

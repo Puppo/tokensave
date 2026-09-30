@@ -5,8 +5,7 @@ use tokensave::agents::{
     AgentIntegration, DoctorCounters, HealthcheckContext, OpenCodeIntegration,
 };
 
-mod common;
-use common::{make_install_ctx as make_ctx, read_json};
+use crate::common::{make_install_ctx as make_ctx, read_json};
 
 fn opencode_config_path(home: &Path) -> std::path::PathBuf {
     home.join(".config/opencode/opencode.json")

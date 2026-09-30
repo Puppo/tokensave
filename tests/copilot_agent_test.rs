@@ -3,8 +3,7 @@ use std::path::Path;
 use tempfile::TempDir;
 use tokensave::agents::{AgentIntegration, CopilotIntegration, DoctorCounters, HealthcheckContext};
 
-mod common;
-use common::{make_install_ctx as make_ctx, read_json};
+use crate::common::{make_install_ctx as make_ctx, read_json};
 
 /// Platform-specific path for the VS Code settings.json under the temp home.
 fn vscode_settings_path(home: &Path) -> std::path::PathBuf {

@@ -2,8 +2,7 @@ use tempfile::TempDir;
 use tokensave::agents::get_integration;
 use tokensave::agents::{DoctorCounters, HealthcheckContext, InstallContext, InstallScope};
 
-mod common;
-use common::read_json;
+use crate::common::read_json;
 
 #[test]
 fn codex_does_not_support_local() {

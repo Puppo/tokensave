@@ -9,6 +9,8 @@ use tokensave::branch_meta::{self, BranchMeta};
 use tokensave::tokensave::{is_test_file, TokenSave};
 use tokensave::types::NodeKind;
 
+use crate::common::qualified_test_name;
+
 // ---------------------------------------------------------------------------
 // Shared setup
 // ---------------------------------------------------------------------------
@@ -282,7 +284,11 @@ async fn open_read_only_omitted_branch_does_not_auto_track() {
     .unwrap();
     let before = fixture.metadata_snapshot();
     let output = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "open_read_only_env_helper", "--nocapture"])
+        .args([
+            "--exact",
+            &qualified_test_name(module_path!(), "open_read_only_env_helper"),
+            "--nocapture",
+        ])
         .env("TOKENSAVE_OPEN_READ_ONLY_TEST_ROOT", fixture.root())
         .env("TOKENSAVE_AUTO_TRACK", "true")
         .output()

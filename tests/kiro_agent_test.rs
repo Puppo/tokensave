@@ -16,8 +16,7 @@ fn make_ctx(home: &Path) -> InstallContext {
     }
 }
 
-mod common;
-use common::read_json;
+use crate::common::read_json;
 use tokensave::agents::kiro::file_resource_uri;
 
 fn assert_hook(

@@ -6,8 +6,7 @@ use tokensave::agents::{
     PlankIntegration,
 };
 
-mod common;
-use common::{make_install_ctx as make_ctx, read_json};
+use crate::common::{make_install_ctx as make_ctx, read_json};
 
 // ---------------------------------------------------------------------------
 // Helpers

@@ -1,3 +1,8 @@
+[alias]
+# Local test loop over the 11 lite-tier languages only: every test binary links
+# far fewer grammars. Language tests for other tiers are `#![cfg]`-gated out.
+test-lite = "test --workspace --no-default-features --features lite"
+
 [env]
 # Disable C/C++ assertions in vendored tree-sitter grammars so that grammar
 # bugs (e.g. the tree-sitter-markdown autolink assertion) produce a failed

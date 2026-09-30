@@ -11,6 +11,7 @@
 //! separate from its entity, so the hierarchy edge starts at the architecture
 //! and the architecture needs its own link back to the entity.
 
+#![cfg(feature = "lang-vhdl")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::fs;

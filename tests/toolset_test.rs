@@ -7,7 +7,7 @@
 //! that is not listed must still answer a `tools/call`, so an agent permission
 //! list or a hook that names it keeps working.
 //!
-//! Run with: `cargo test --features test-transport --test toolset_test`
+//! Run with: `cargo test --features test-transport --test integration toolset_test::`
 
 #![cfg(feature = "test-transport")]
 

@@ -3,8 +3,7 @@ use tokensave::agents::{
     expected_tool_perms, AgentIntegration, ClaudeIntegration, DoctorCounters, HealthcheckContext,
 };
 
-mod common;
-use common::{make_install_ctx, make_install_ctx_with_real_bin, read_json};
+use crate::common::{make_install_ctx, make_install_ctx_with_real_bin, read_json};
 
 // ===========================================================================
 // Install content verification

@@ -4,8 +4,7 @@ use tokensave::extraction::LanguageExtractor;
 use tokensave::extraction::QuintExtractor;
 use tokensave::types::*;
 
-mod common;
-use common::names_of;
+use crate::common::names_of;
 
 fn extract(source: &str) -> ExtractionResult {
     QuintExtractor.extract("spec.qnt", source)

@@ -5,8 +5,7 @@ use tokensave::extraction::ActionScriptExtractor;
 use tokensave::extraction::LanguageExtractor;
 use tokensave::types::*;
 
-mod common;
-use common::names_of;
+use crate::common::names_of;
 
 fn extract_fixture() -> ExtractionResult {
     let source = std::fs::read_to_string("tests/fixtures/sample.as").unwrap();

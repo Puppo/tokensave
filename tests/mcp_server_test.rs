@@ -1,7 +1,7 @@
 //! Integration tests for the MCP server (`McpServer`) exercising the full
 //! JSON-RPC 2.0 protocol via `ChannelTransport`.
 //!
-//! Run with: `cargo test --features test-transport --test mcp_server_test`
+//! Run with: `cargo test --features test-transport --test integration mcp_server_test::`
 
 #![cfg(feature = "test-transport")]
 
@@ -17,6 +17,8 @@ use tokensave::db::{migrations::latest_version, Database};
 use tokensave::mcp::transport::ChannelTransport;
 use tokensave::mcp::McpServer;
 use tokensave::tokensave::TokenSave;
+
+use crate::common::qualified_test_name;
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -1887,7 +1889,10 @@ async fn selected_calls_skip_all_accounting_and_preserve_local_schema_charge() {
         command
             .args([
                 "--exact",
-                "selected_calls_skip_all_accounting_and_preserve_local_schema_charge",
+                &qualified_test_name(
+                    module_path!(),
+                    "selected_calls_skip_all_accounting_and_preserve_local_schema_charge",
+                ),
                 "--nocapture",
             ])
             .env("TOKENSAVE_SELECTED_ACCOUNTING_HOME", home.path())

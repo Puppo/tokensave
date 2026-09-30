@@ -9,7 +9,7 @@
 //! setting removes both, and these tests pin down that the ledger keeps
 //! recording either way, so `tokensave gain` still works when it is off.
 //!
-//! Run with: `cargo test --features test-transport --test report_savings_test`
+//! Run with: `cargo test --features test-transport --test integration report_savings_test::`
 
 #![cfg(feature = "test-transport")]
 

@@ -3,6 +3,8 @@ name = "tokensave"
 version = "7.13.0"
 edition = "2021"
 rust-version = "1.95.0"
+# Integration tests are declared explicitly below: see tests/integration.rs.
+autotests = false
 description = "Code intelligence tool that builds a semantic knowledge graph from Rust, Go, Java, Scala, TypeScript, Python, C, C++, Kotlin, C#, Swift, and many more codebases"
 license = "MIT"
 repository = "https://github.com/aovestdipaperino/tokensave"
@@ -194,6 +196,63 @@ rustls-native-certs = "0.8"
 tempfile = "3"
 criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
 
+# All integration tests share one binary (tests/integration.rs). The targets
+# after it stay separate because they mutate process-global state that the
+# concurrently running tests in a shared binary would observe.
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
+
+# sets TOKENSAVE_AUTOSYNC_BUDGET_MS, read by every sync
+[[test]]
+name = "autosync_budget_test"
+path = "tests/autosync_budget_test.rs"
+
+# raises the process-global cancellation flag
+[[test]]
+name = "cancel_shutdown_test"
+path = "tests/cancel_shutdown_test.rs"
+
+# sets HOME/USERPROFILE
+[[test]]
+name = "global_git_hooks_failure_test"
+path = "tests/global_git_hooks_failure_test.rs"
+
+# sets HOME/USERPROFILE
+[[test]]
+name = "global_git_hooks_forwarder_failure_test"
+path = "tests/global_git_hooks_forwarder_failure_test.rs"
+
+# sets HOME/USERPROFILE
+[[test]]
+name = "global_git_hooks_partial_failure_test"
+path = "tests/global_git_hooks_partial_failure_test.rs"
+
+# sets TOKENSAVE_FULL_RESOLVE, read by every resolve
+[[test]]
+name = "incremental_resolution_test"
+path = "tests/incremental_resolution_test.rs"
+
+# sets GIT_CONFIG_*, inherited by every git child
+[[test]]
+name = "local_git_hooks_shadow_test"
+path = "tests/local_git_hooks_shadow_test.rs"
+
+# rewrites PATH and OMP_PROFILE/PI_PROFILE
+[[test]]
+name = "omp_agent_test"
+path = "tests/omp_agent_test.rs"
+
+# sets PI_CODING_AGENT_DIR
+[[test]]
+name = "pi_agent_test"
+path = "tests/pi_agent_test.rs"
+
+# sets SSL_CERT_FILE/SSL_CERT_DIR
+[[test]]
+name = "tls_root_fallback_test"
+path = "tests/tls_root_fallback_test.rs"
+
 [[bench]]
 name = "large_repos"
 harness = false
@@ -219,6 +278,9 @@ debug = "line-tables-only"
 
 [profile.test]
 debug = "line-tables-only"
+# Incremental state is ~as large as the artifacts it caches and kache does not
+# cache incremental builds, so it only costs disk for test builds.
+incremental = false
 
 # Release builds bundle 50+ tree-sitter grammars plus SQLite; without LTO and
 # a single codegen unit the binary balloons to ~170 MB (#562). `panic = "abort"`

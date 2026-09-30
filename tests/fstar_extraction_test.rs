@@ -17,7 +17,7 @@ fn sample() -> ExtractionResult {
     FStarExtractor.extract("Demo.fst", SAMPLE)
 }
 
-mod common;
+use crate::common;
 
 /// Sorted names of extracted nodes of the given kind.
 fn names_of(result: &ExtractionResult, kind: NodeKind) -> Vec<String> {

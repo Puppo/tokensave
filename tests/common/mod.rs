@@ -1,7 +1,8 @@
 //! Shared helpers for integration tests.
 //!
-//! Each integration test binary compiles this module independently, so not
-//! every helper is used by every test.
+//! Compiled once into the shared `integration` test binary and once into each
+//! isolated `[[test]]` target that declares it, so not every helper is used by
+//! every binary.
 #![allow(dead_code)]
 
 use std::path::Path;
@@ -56,4 +57,15 @@ pub fn make_install_ctx_with_real_bin(home: &Path) -> InstallContext {
 pub fn read_json(path: &Path) -> serde_json::Value {
     let contents = std::fs::read_to_string(path).unwrap();
     serde_json::from_str(&contents).unwrap()
+}
+
+/// The libtest name of `test` declared in the module at `module_path`, for a
+/// test that re-runs its own binary with `--exact`. libtest names omit the
+/// crate, so `integration::sync_test` + `foo` is `sync_test::foo`, while a
+/// test at the root of its own binary is just `foo`.
+pub fn qualified_test_name(module_path: &str, test: &str) -> String {
+    match module_path.split_once("::") {
+        Some((_, module)) => format!("{module}::{test}"),
+        None => test.to_string(),
+    }
 }

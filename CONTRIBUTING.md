@@ -88,21 +88,31 @@ cargo test --locked --no-default-features --features lite
 1. Add a tree-sitter grammar dependency (or vendor it under `vendor/`).
 2. Create `src/extraction/{lang}_extractor.rs` implementing the `Extractor` trait.
 3. Register it in the `LanguageRegistry` with a feature flag (e.g., `lang-{name}`).
-4. Add a fixture file `tests/fixtures/sample.{ext}` and a test file `tests/{lang}_extraction_test.rs`.
+4. Add a fixture file `tests/fixtures/sample.{ext}` and a test file `tests/{lang}_extraction_test.rs`, then declare it as `mod {lang}_extraction_test;` in `tests/integration.rs` (test files are not auto-discovered; see [Test layout](#test-layout)).
 5. Update the feature flag tables in `Cargo.toml` and this document.
 
 ## Running Specific Tests
 
 ```bash
-# All tests for a specific language
-cargo test --locked --test rust_extraction_test
+# All tests for a specific language (a module of the shared integration binary)
+cargo test --locked --test integration rust_extraction_test::
 
 # A single test by name
 cargo test --locked test_find_stale_files
 
 # Only sync-related tests
 cargo test --locked sync
+
+# Faster local loop: only the 11 lite-tier languages (language tests for the
+# other tiers are compiled out). CI still runs the full feature set.
+cargo test-lite
 ```
+
+### Test layout
+
+All `tests/*.rs` files are modules of one test binary, `tests/integration.rs`, because every test binary statically links all tree-sitter grammars and SQLite: 180 separate binaries took hundreds of gigabytes of `target/`. `Cargo.toml` sets `autotests = false`, so a new test file must be declared as a `mod` in `tests/integration.rs`, and helpers are shared through `crate::common`.
+
+Tests in the shared binary run concurrently with every other test file, so a test must not mutate process-global state: environment variables (`std::env::set_var`), the current directory, or the `tokensave::cancel` flag. Such a file gets its own `[[test]]` target in `Cargo.toml` instead, next to the existing isolated ones. A test that re-runs its own binary with `--exact` must pass the module-qualified name from `common::qualified_test_name(module_path!(), "...")`.
 
 ## Environment Variables
 

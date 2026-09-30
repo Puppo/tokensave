@@ -3,8 +3,7 @@ use std::path::Path;
 use tempfile::TempDir;
 use tokensave::agents::*;
 
-mod common;
-use common::{make_install_ctx, make_install_ctx_with_real_bin};
+use crate::common::{make_install_ctx, make_install_ctx_with_real_bin};
 
 // ---------------------------------------------------------------------------
 // 1. Registry tests

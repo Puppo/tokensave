@@ -15,9 +15,14 @@
     recycle the block, which turns a statistical argument into a binary one.
 
 .PARAMETER Test
-    Integration test target to stress, e.g. db_query_test. Defaults to the whole
-    suite ("--workspace"), which is slower but covers binaries beyond the two
-    named in #367.
+    Test target to stress: "integration" (the shared binary holding most
+    tests/*.rs files) or one of the isolated targets listed in Cargo.toml.
+    Defaults to the whole suite ("--workspace"), which is slower but covers
+    binaries beyond the two named in #367.
+
+.PARAMETER Filter
+    libtest name filter passed to each binary, e.g. "db_query_test::" to run
+    one file's module inside the integration binary.
 
 .PARAMETER Iterations
     How many times to run the binary. 200 is a reasonable starting point for a
@@ -45,14 +50,15 @@
     Point this at a volume with room to spare.
 
 .EXAMPLE
-    ./scripts/win-stress.ps1 -Test db_query_test -Iterations 200
+    ./scripts/win-stress.ps1 -Test integration -Filter db_query_test:: -Iterations 200
 
 .EXAMPLE
-    ./scripts/win-stress.ps1 -Test db_query_test -Iterations 50 -Verifier
+    ./scripts/win-stress.ps1 -Test integration -Filter db_query_test:: -Iterations 50 -Verifier
 #>
 [CmdletBinding()]
 param(
     [string] $Test = '',
+    [string] $Filter = '',
     [int]    $Iterations = 200,
     [int]    $TestThreads = 0,
     [switch] $Verifier,
@@ -97,6 +103,7 @@ try {
 
     $harnessArgs = @()
     if ($TestThreads -gt 0) { $harnessArgs += @('--test-threads', "$TestThreads") }
+    if ($Filter) { $harnessArgs += $Filter }
 
     if ($Verifier) {
         foreach ($binary in $binaries) {

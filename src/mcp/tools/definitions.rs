@@ -471,9 +471,42 @@ pub fn tool_area(name: &str) -> &'static str {
         .map_or("navigate", |(area, _, _)| area)
 }
 
+/// A tool name for a hint in a tool result, with how to list it when the core
+/// toolset hides it (#576): `tokensave_doc (via tokensave_more area
+/// "navigate" if not listed)`. A core tool is returned as is.
+pub fn reachable_tool_name(name: &str) -> String {
+    if CORE_TOOLS.contains(&name) {
+        return name.to_string();
+    }
+    format!(
+        "{name} (via {MORE_TOOL} area \"{}\" if not listed)",
+        tool_area(name)
+    )
+}
+
 /// True when `area` is `"all"` or the name of an entry in [`TOOL_AREAS`].
 pub fn is_tool_area(area: &str) -> bool {
     area == "all" || TOOL_AREAS.iter().any(|(name, _, _)| *name == area)
+}
+
+/// The `initialize` instructions sentence for the core toolset (#576): which
+/// tools are listed, and which areas [`MORE_TOOL`] can add.
+///
+/// A client that defers tool schemas (Claude Code) shows the model the server
+/// instructions before any schema, so this map is how a session learns that a
+/// tool it was told to use, such as `tokensave_node`, is one call away. It is
+/// sent once per session, not once per turn.
+pub fn core_toolset_instructions() -> String {
+    use std::fmt::Write;
+    let mut text = format!(
+        " Only the core tools are listed: {}. To list more, call {MORE_TOOL} with an area:",
+        CORE_TOOLS.join(", ")
+    );
+    for (area, summary, _) in TOOL_AREAS {
+        let _ = write!(text, " {area} ({summary}),");
+    }
+    text.push_str(" or all.");
+    text
 }
 
 fn def_more() -> ToolDefinition {
@@ -500,6 +533,18 @@ fn def_more() -> ToolDefinition {
             "required": ["area"]
         }),
     )
+}
+
+/// Every tool an agent can be granted at install time: all of
+/// [`get_tool_definitions`] plus [`MORE_TOOL`].
+///
+/// `tokensave_more` is not in [`get_tool_definitions`] because the full
+/// toolset never lists it, but the core toolset is the default (#576), so a
+/// permission list without it prompts on the first call that lists more tools.
+pub fn get_installable_tool_definitions() -> Vec<ToolDefinition> {
+    let mut definitions = get_tool_definitions();
+    definitions.push(def_more());
+    definitions
 }
 
 /// Returns the tool definitions that `tools/list` sends for `toolset`.
@@ -3206,6 +3251,21 @@ mod tests {
                 definition.description.len()
             );
         }
+    }
+
+    /// #576: a hint naming a hidden tool says which area lists it; a core tool
+    /// needs no such note.
+    #[test]
+    fn a_hint_names_the_area_that_lists_a_hidden_tool() {
+        assert_eq!(
+            reachable_tool_name("tokensave_doc"),
+            "tokensave_doc (via tokensave_more area \"navigate\" if not listed)"
+        );
+        assert_eq!(
+            reachable_tool_name("tokensave_blame"),
+            "tokensave_blame (via tokensave_more area \"git\" if not listed)"
+        );
+        assert_eq!(reachable_tool_name("tokensave_search"), "tokensave_search");
     }
 
     /// #576: the core toolset lists exactly `CORE_TOOLS`, every name in it is a

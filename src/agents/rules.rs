@@ -97,7 +97,9 @@ const CANONICAL_RULES_MARKDOWN: &str = "## Prefer tokensave MCP tools\n\n\
 Before reading source files or scanning a codebase, use the tokensave MCP tools: \
 `tokensave_context` for exploration, `tokensave_search` for a known symbol, plus \
 `tokensave_callers`, `tokensave_callees`, `tokensave_impact`, `tokensave_node`, \
-`tokensave_files`, and `tokensave_affected`.\n\n\
+`tokensave_files`, and `tokensave_affected`. A tool that is not in your tool \
+list is listed by calling `tokensave_more` with its area: `navigate` for \
+`tokensave_node`, `git` for `tokensave_affected` and the branch tools.\n\n\
 To read a file's contents, use `tokensave_read`: it reads any path, indexed or \
 not, and slices with `mode: \"lines\"` or maps a file's symbols with \
 `mode: \"map\"` instead of pulling in the whole body. Use the harness's own \
@@ -862,6 +864,37 @@ mod tests {
         assert!(body.contains("graph_root"));
         assert!(body.contains("branch-meta.json"));
         assert!(body.contains("filesystem"));
+    }
+
+    /// The core toolset is the default (#576), so a tool the rules name that
+    /// is not core is not in the agent's tool list. The rules must say how to
+    /// list it: `tokensave_more` with that tool's area.
+    #[test]
+    fn rules_say_how_to_list_every_non_core_tool_they_name() {
+        use crate::mcp::tools::{tool_area, CORE_TOOLS, MORE_TOOL};
+        for agent in ["claude", "kiro", "omp", "auggie", "codex"] {
+            let body = expected_rules_markdown(agent).unwrap();
+            let named: std::collections::BTreeSet<&str> = body
+                .match_indices("tokensave_")
+                .map(|(at, _)| {
+                    let rest = &body[at..];
+                    let end = rest
+                        .find(|c: char| !(c.is_ascii_lowercase() || c == '_'))
+                        .unwrap_or(rest.len());
+                    &rest[..end]
+                })
+                .filter(|name| !CORE_TOOLS.contains(name) && *name != MORE_TOOL)
+                .collect();
+            assert!(!named.is_empty(), "{agent}: expected some non-core tool");
+            assert!(body.contains(MORE_TOOL), "{agent}: {MORE_TOOL} missing");
+            for name in named {
+                let area = tool_area(name);
+                assert!(
+                    body.contains(&format!("`{area}`")),
+                    "{agent}: {name} is in area {area}, which the rules do not name"
+                );
+            }
+        }
     }
 
     #[test]

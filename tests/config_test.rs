@@ -109,7 +109,8 @@ fn test_legacy_config_with_include_field_still_loads() {
     }"#;
     std::fs::write(tokensave_dir.join("config.json"), legacy_json).unwrap();
     let loaded = load_config(dir.path()).unwrap();
-    assert_eq!(loaded.version, 1);
+    // Loading migrates a version 1 config to the current schema (#576).
+    assert_eq!(loaded.version, tokensave::config::CONFIG_VERSION);
     assert!(loaded.exclude.contains(&"target/**".to_string()));
 }
 

@@ -323,6 +323,11 @@ async fn rename_preview_is_a_hidden_dry_run_alias() {
     let listed = get_listed_tool_definitions(Toolset::Full, &BTreeSet::new());
     assert!(listed.iter().any(|d| d.name == "tokensave_rename"));
     assert_eq!(tool_area("tokensave_rename"), "edit");
+    // Permission lists keep both names, so an allowlisted alias still works.
+    let installable = tokensave::mcp::tools::get_installable_tool_definitions();
+    for name in ["tokensave_rename", "tokensave_rename_preview"] {
+        assert!(installable.iter().any(|d| d.name == name), "{name}");
+    }
 }
 
 #[tokio::test]

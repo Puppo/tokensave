@@ -10,6 +10,14 @@ use crate::errors::{Result, TokenSaveError};
 /// Name of the configuration file stored inside the `.tokensave` directory.
 pub const CONFIG_FILENAME: &str = "config.json";
 
+/// Schema version of `config.json`.
+///
+/// Version 2 (#576) changed the default toolset from full to core and stopped
+/// writing `tools` when it is unset. Version 1 wrote `"tools": "full"` into
+/// every config it saved, so [`load_config`] reads that value in a version 1
+/// file as the old default rather than as a choice.
+pub const CONFIG_VERSION: u32 = 2;
+
 /// Name of the hidden directory used to store `TokenSave` metadata.
 pub const TOKENSAVE_DIR: &str = ".tokensave";
 
@@ -36,10 +44,11 @@ fn default_docs_dir() -> String {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Toolset {
-    /// Every tool. The default, so an upgrade changes nothing.
-    #[default]
+    /// Every tool. The opt-out from the core default.
     Full,
-    /// Only the tools in `CORE_TOOLS` (see `mcp::tools`).
+    /// Only the tools in `CORE_TOOLS` (see `mcp::tools`), plus `tokensave_more`
+    /// to list the others on demand. The default.
+    #[default]
     Core,
 }
 
@@ -55,8 +64,10 @@ impl Toolset {
     }
 
     /// The toolset to list: `TOKENSAVE_TOOLS` when it names one, otherwise
-    /// `configured`. Shared by a served project and a server with no default
-    /// project (#606), which has only the built-in default to fall back to.
+    /// `configured`, which is the project's `tools` or, when that is unset,
+    /// the built-in default ([`Toolset::Core`]). Shared by a served project and
+    /// a server with no default project (#606), which has only the built-in
+    /// default to fall back to.
     pub fn resolve(configured: Self) -> Self {
         std::env::var("TOKENSAVE_TOOLS")
             .ok()
@@ -197,15 +208,18 @@ pub struct TokenSaveConfig {
     /// instead of on every server start.
     #[serde(default)]
     pub suppress_scope_warning: bool,
-    /// Which tools the MCP server lists in `tools/list` (#576). Defaults to
-    /// [`Toolset::Full`]. The `TOKENSAVE_TOOLS` env var overrides this per-run.
+    /// Which tools the MCP server lists in `tools/list` (#576). Unset means
+    /// the built-in default, [`Toolset::Core`]; `"full"` lists every tool. The
+    /// `TOKENSAVE_TOOLS` env var overrides this per-run.
     ///
     /// A client sends every listed tool schema on every turn, before any tool
     /// is called, so the full surface is a fixed cost of the context window.
     /// On a small-context model that cost can be more than half the window.
-    /// [`Toolset::Core`] lists only the tools most sessions use.
-    #[serde(default)]
-    pub tools: Toolset,
+    ///
+    /// Unset is not written, so a project that never chose a toolset follows
+    /// the default when it changes. See [`CONFIG_VERSION`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Toolset>,
 }
 
 /// Serde default for [`TokenSaveConfig::artifact_extensions`].
@@ -252,7 +266,7 @@ pub fn env_bool_override(var: &str, config_value: bool) -> bool {
 impl Default for TokenSaveConfig {
     fn default() -> Self {
         Self {
-            version: 1,
+            version: CONFIG_VERSION,
             root_dir: String::new(),
             exclude: vec![
                 // Tool/output/state dirs are matched at any depth (`**/`), so a
@@ -292,7 +306,7 @@ impl Default for TokenSaveConfig {
             report_savings: default_report_savings(),
             artifact_extensions: default_artifact_extensions(),
             suppress_scope_warning: false,
-            tools: Toolset::default(),
+            tools: None,
         }
     }
 }
@@ -329,7 +343,7 @@ pub fn load_config(project_root: &Path) -> Result<TokenSaveConfig> {
         ),
     })?;
 
-    let config: TokenSaveConfig =
+    let mut config: TokenSaveConfig =
         serde_json::from_str(&contents).map_err(|e| TokenSaveError::Config {
             message: format!(
                 "failed to parse config file '{}': {}",
@@ -337,8 +351,22 @@ pub fn load_config(project_root: &Path) -> Result<TokenSaveConfig> {
                 e
             ),
         })?;
+    migrate_config(&mut config);
 
     Ok(config)
+}
+
+/// Brings a config read from disk up to [`CONFIG_VERSION`].
+///
+/// Version 1 (7.13.0) wrote `"tools": "full"` into every config it saved,
+/// because full was its default, so that value says nothing about what the
+/// user wants: it is read as unset, and the next save drops it (#576). A
+/// version 1 `"tools": "core"` was a choice and is kept.
+fn migrate_config(config: &mut TokenSaveConfig) {
+    if config.version < 2 && config.tools == Some(Toolset::Full) {
+        config.tools = None;
+    }
+    config.version = config.version.max(CONFIG_VERSION);
 }
 
 /// Saves the configuration to disk using an atomic write.

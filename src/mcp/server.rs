@@ -2048,10 +2048,7 @@ impl McpServer {
         // toolset never changes, and its handshake stays as it was.
         let core = toolset == crate::config::Toolset::Core;
         if core {
-            let _ = write!(
-                instructions,
-                " Only the core tools are listed. Call {MORE_TOOL} with an area to list more."
-            );
+            instructions.push_str(&crate::mcp::tools::core_toolset_instructions());
         }
 
         JsonRpcResponse::success(

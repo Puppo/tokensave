@@ -101,6 +101,13 @@ pub struct RenamePlan {
     pub sites: Vec<RenameSite>,
     /// Text-only mentions found beyond the listing cap.
     pub text_only_omitted: usize,
+    /// Of those, unlinked identifiers in code. They are not listed, but they
+    /// gate an apply exactly like the listed ones.
+    pub unlinked_code_omitted: usize,
+    /// Indexed files that mention the old name but could not be classified
+    /// (too large to parse, or unreadable). They gate an apply: a reference
+    /// in one of them would be left stale without anyone being told.
+    pub unscanned: Vec<String>,
     /// Conditions that make the rename impossible regardless of flags
     /// (invalid name, collision, file changed since indexing).
     pub blockers: Vec<String>,
@@ -989,6 +996,28 @@ impl RenamePlan {
             .collect()
     }
 
+    /// Reasons an apply is gated that no listed site carries: unlinked
+    /// identifiers past the listing cap, and files that mention the name but
+    /// could not be checked.
+    #[must_use]
+    pub fn unchecked_reasons(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.unlinked_code_omitted > 0 {
+            out.push(format!(
+                "unlisted: {} more unlinked identifier(s) past the listing cap",
+                self.unlinked_code_omitted
+            ));
+        }
+        if !self.unscanned.is_empty() {
+            out.push(format!(
+                "{} file(s) mention the name but could not be checked: {}",
+                self.unscanned.len(),
+                self.unscanned.join(", ")
+            ));
+        }
+        out
+    }
+
     /// Sites the edit would change.
     fn editable(&self, allow_heuristic: bool) -> Vec<&RenameSite> {
         self.sites
@@ -1091,6 +1120,8 @@ impl TokenSave {
             new_name: new_name.map(str::to_string),
             sites: Vec::new(),
             text_only_omitted: 0,
+            unlinked_code_omitted: 0,
+            unscanned: Vec::new(),
             blockers: Vec::new(),
             warnings: Vec::new(),
             sources: HashMap::new(),
@@ -1559,18 +1590,36 @@ impl TokenSave {
         records.sort_by(|a, b| a.path.cmp(&b.path));
         let mut listed = 0usize;
         for record in records {
-            if record.size > TEXT_SCAN_MAX_BYTES {
-                continue;
-            }
             if record.kind == FileKind::Artifact && !is_doc_path(&record.path) {
                 continue;
             }
             if !files.contains_key(&record.path) {
                 let (abs, _) = self.resolve_edit_target(&record.path, root_override);
-                let Ok(source) = std::fs::read_to_string(&abs) else {
+                let source = match std::fs::read(&abs) {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        if e.kind() != std::io::ErrorKind::NotFound {
+                            plan.unscanned
+                                .push(format!("{} (unreadable: {e})", record.path));
+                        }
+                        continue;
+                    }
+                };
+                // A cheap byte search first: most files never mention the
+                // name, and only those that do are decoded and parsed.
+                if !contains_bytes(&source, name.as_bytes()) {
+                    continue;
+                }
+                let Ok(source) = String::from_utf8(source) else {
+                    plan.unscanned.push(format!("{} (not UTF-8)", record.path));
                     continue;
                 };
-                if !source.contains(name) {
+                if source.len() as u64 > TEXT_SCAN_MAX_BYTES {
+                    plan.unscanned.push(format!(
+                        "{} ({} bytes, over the {TEXT_SCAN_MAX_BYTES}-byte scan limit)",
+                        record.path,
+                        source.len()
+                    ));
                     continue;
                 }
                 plan.abs_paths.insert(record.path.clone(), abs);
@@ -1586,13 +1635,18 @@ impl TokenSave {
                 if covered.contains(&(record.path.clone(), start)) {
                     continue;
                 }
+                let end = start + name.len();
+                let context = text.mention_context(start, end);
+                // Past the cap a mention is counted rather than listed, but
+                // an unlinked identifier still gates an apply.
                 if listed >= TEXT_ONLY_LIST_CAP {
                     plan.text_only_omitted += 1;
+                    if context == "code" {
+                        plan.unlinked_code_omitted += 1;
+                    }
                     continue;
                 }
                 listed += 1;
-                let end = start + name.len();
-                let context = text.mention_context(start, end);
                 let (row, _) = text.position(start);
                 plan.sites.push(make_site(
                     text,
@@ -1643,12 +1697,21 @@ impl TokenSave {
             return Ok(outcome);
         }
         let non_exact = plan.non_exact_sites();
-        if !allow_heuristic && !non_exact.is_empty() {
+        let unchecked = plan.unchecked_reasons();
+        if !allow_heuristic && (!non_exact.is_empty() || !unchecked.is_empty()) {
+            let mut reasons = Vec::new();
+            if !non_exact.is_empty() || plan.unlinked_code_omitted > 0 {
+                reasons.push(format!(
+                    "{} site(s) are not exact (heuristic, ambiguous, or an unlinked identifier \
+                     in code)",
+                    non_exact.len() + plan.unlinked_code_omitted
+                ));
+            }
+            reasons.extend(unchecked.into_iter().filter(|r| !r.starts_with("unlisted")));
             outcome.refused = Some(format!(
-                "{} site(s) are not exact (heuristic, ambiguous, or an unlinked identifier in \
-                 code). Review them; pass allow_heuristic=true to edit the heuristic ones too. \
+                "{}. Review them; pass allow_heuristic=true to edit the heuristic sites too. \
                  Ambiguous and text-only sites are never edited.",
-                non_exact.len()
+                reasons.join("; ")
             ));
             outcome.blocking_sites = non_exact.into_iter().take(50).cloned().collect();
             return Ok(outcome);
@@ -1685,14 +1748,25 @@ impl TokenSave {
         }
 
         outcome.applied = true;
+        let mut reindex: Vec<String> = Vec::new();
         for (file, (_, count)) in &edited {
             outcome.files_changed.push((file.clone(), *count));
             if let Some(Some(rel)) = plan.index_paths.get(file) {
-                if let Err(e) = self.reindex_file(rel).await {
-                    outcome
-                        .warnings
-                        .push(format!("{file} was written but reindexing it failed: {e}"));
-                }
+                reindex.push(rel.clone());
+            }
+        }
+        // All edited files in one pass, then one resolution over what they
+        // touched: the path `sync` takes for changed files. Re-indexing them
+        // one at a time (`reindex_file`) inserted the callers before the
+        // renamed definition existed and resolved nothing, so the callers'
+        // edges were lost, and a later `sync` saw matching hashes and never
+        // brought them back.
+        if !reindex.is_empty() {
+            if let Err(e) = self.sync_single_files(&reindex).await {
+                outcome.warnings.push(format!(
+                    "the files were written but reindexing them failed ({e}); run `tokensave \
+                     sync --force` to rebuild the graph"
+                ));
             }
         }
         Ok(outcome)
@@ -1775,6 +1849,11 @@ fn commit_edits(
     Ok(Err(format!("write failed, all files restored: {failure}")))
 }
 
+/// Whether `needle` occurs in `haystack`.
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty() && haystack.windows(needle.len()).any(|w| w == needle)
+}
+
 /// True for documentation files worth scanning for mentions.
 fn is_doc_path(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
@@ -1784,7 +1863,18 @@ fn is_doc_path(path: &str) -> bool {
 }
 
 /// Writes `contents` to a sibling temporary file and renames it over `path`.
+///
+/// A symlink is followed: the rename lands on the file it points to, and the
+/// link itself is left in place. Renaming over the link would replace it with
+/// a plain file and leave the real file unedited.
 fn write_atomically(path: &Path, contents: &str) -> std::io::Result<()> {
+    let resolved;
+    let path = if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        resolved = std::fs::canonicalize(path)?;
+        resolved.as_path()
+    } else {
+        path
+    };
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     let file_name = path
         .file_name()
@@ -1910,6 +2000,47 @@ mod tests {
         let bad = parse(&lang, "def class(self):\n    pass\n").unwrap();
         assert_eq!(error_count(&good), 0);
         assert!(error_count(&bad) > 0);
+    }
+
+    #[test]
+    fn commit_edits_restores_written_files_when_a_later_write_fails() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let a_old = "def greet():\n    pass\n";
+        std::fs::write(dir.path().join("a.py"), a_old).unwrap();
+        let originals: HashMap<String, String> = [
+            ("a.py".to_string(), a_old.to_string()),
+            (
+                "b.py".to_string(),
+                "def greet2():\n    greet()\n".to_string(),
+            ),
+        ]
+        .into();
+        // b.py's directory does not exist, so its write fails after a.py's
+        // has already landed.
+        let abs_paths: HashMap<String, PathBuf> = [
+            ("a.py".to_string(), dir.path().join("a.py")),
+            ("b.py".to_string(), dir.path().join("missing").join("b.py")),
+        ]
+        .into();
+        let edited: BTreeMap<String, (String, usize)> = [
+            (
+                "a.py".to_string(),
+                ("def salute():\n    pass\n".to_string(), 1),
+            ),
+            (
+                "b.py".to_string(),
+                ("def greet2():\n    salute()\n".to_string(), 1),
+            ),
+        ]
+        .into();
+        let refusal = commit_edits(&edited, &originals, &abs_paths)
+            .unwrap()
+            .unwrap_err();
+        assert!(refusal.contains("all files restored"), "{refusal}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.py")).unwrap(),
+            a_old
+        );
     }
 
     #[test]

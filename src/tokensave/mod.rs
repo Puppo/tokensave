@@ -215,6 +215,20 @@ impl TokenSave {
     /// If the previous operation was interrupted (dirty sentinel exists),
     /// the database is integrity-checked and rebuilt if corrupted.
     pub async fn open(project_root: &Path) -> Result<Self> {
+        Self::open_with(project_root, false).await
+    }
+
+    /// Like [`Self::open`], but a database whose schema migration fails is
+    /// deleted and rebuilt from the source instead of failing the open.
+    ///
+    /// Used by `tokensave sync --force`, which the migration error names as
+    /// the way out: a failed migration rolls back, so without this every
+    /// later open, the forced sync included, would fail the same way.
+    pub async fn open_rebuilding_failed_migration(project_root: &Path) -> Result<Self> {
+        Self::open_with(project_root, true).await
+    }
+
+    async fn open_with(project_root: &Path, rebuild_failed_migration: bool) -> Result<Self> {
         let config = load_config(project_root)?;
         let tokensave_dir = get_tokensave_dir(project_root);
         let active_branch = branch::current_branch(project_root);
@@ -265,8 +279,16 @@ impl TokenSave {
         let open_result = Database::open(&db_path).await;
         let (db, migrated) = match open_result {
             Ok(pair) => pair,
-            Err(ref e) if Database::is_corruption_error(e) || crashed => {
-                print_corruption_warning();
+            Err(ref e)
+                if Database::is_corruption_error(e)
+                    || crashed
+                    || (rebuild_failed_migration && Database::is_migration_error(e)) =>
+            {
+                if Database::is_migration_error(e) {
+                    eprintln!("[tokensave] {e}\n[tokensave] rebuilding the database…");
+                } else {
+                    print_corruption_warning();
+                }
                 delete_db_files(&db_path);
                 clear_dirty_sentinel(project_root);
                 let (db, _) = Database::initialize(&db_path).await?;

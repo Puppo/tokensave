@@ -905,14 +905,14 @@ impl<'a> ReferenceResolver<'a> {
                 &a.target,
                 a.kind.as_str(),
                 &a.line,
-                a.provenance_rank(),
+                a.provenance_key(),
             )
                 .cmp(&(
                     &b.source,
                     &b.target,
                     b.kind.as_str(),
                     &b.line,
-                    b.provenance_rank(),
+                    b.provenance_key(),
                 ))
         });
         edges.dedup_by(|a, b| {

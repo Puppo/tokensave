@@ -423,10 +423,22 @@ pub async fn migrate(conn: &Connection) -> Result<bool> {
         }
         Err(e) => {
             let _ = conn.execute("ROLLBACK", ()).await;
-            Err(e)
+            // The transaction rolled back, so the database is still the old
+            // version and every later open fails the same way. Say how out:
+            // `sync --force` rebuilds a database whose migration fails.
+            Err(TokenSaveError::Database {
+                message: format!(
+                    "schema migration v{current} → v{LATEST_VERSION} failed ({e}). \
+                     Run `tokensave sync --force` to rebuild the index."
+                ),
+                operation: MIGRATION_FAILED.to_string(),
+            })
         }
     }
 }
+
+/// `operation` of the error [`migrate`] returns when a migration fails.
+pub const MIGRATION_FAILED: &str = "migrate";
 
 /// Applies migrations sequentially from `current` up to `LATEST_VERSION`.
 async fn run_migrations(conn: &Connection, current: u32) -> Result<()> {
@@ -1592,6 +1604,30 @@ async fn migrate_v17(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Names of the explicit indexes on `table` whose definition mentions
+/// `column`.
+async fn indexes_naming(conn: &Connection, table: &str, column: &str) -> Result<Vec<String>> {
+    let mut rows = conn
+        .query(
+            "SELECT name FROM sqlite_master
+             WHERE type = 'index' AND tbl_name = ?1 AND sql IS NOT NULL AND sql LIKE ?2",
+            params![table, format!("%{column}%")],
+        )
+        .await
+        .map_err(|e| TokenSaveError::Database {
+            message: format!("failed to list indexes on {table}: {e}"),
+            operation: "indexes_naming".to_string(),
+        })?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next().await.map_err(|e| TokenSaveError::Database {
+        message: format!("failed to read index row: {e}"),
+        operation: "indexes_naming".to_string(),
+    })? {
+        out.push(row.get::<String>(0).unwrap_or_default());
+    }
+    Ok(out)
+}
+
 /// Returns the column names of `table` via `PRAGMA table_info`.
 async fn table_columns(conn: &Connection, table: &str) -> Result<Vec<String>> {
     // PRAGMA does not accept a bound parameter for the table name, and this is
@@ -1630,11 +1666,13 @@ async fn table_columns(conn: &Connection, table: &str) -> Result<Vec<String>> {
 /// not text: the edges table is the largest in the database, and a code of
 /// 1–127 costs one byte per row where `'simple-name-match'` would cost 17.
 ///
-/// Databases created before the migration runner existed can carry a
-/// leftover `resolved_by TEXT NOT NULL DEFAULT 'direct'` column that nothing
-/// maintains. It is dropped and re-added rather than reused: its `NOT NULL`
-/// rejects the NULL written for extractor edges, and its TEXT affinity would
-/// turn every stored code into a string.
+/// Databases that went through the 5.0-beta v8 migration (91ad260) carry a
+/// leftover `resolved_by TEXT NOT NULL DEFAULT 'direct'` column, indexed by
+/// `idx_edges_resolved_by`, that nothing has maintained since. It is dropped
+/// and re-added rather than reused: its `NOT NULL` rejects the NULL written
+/// for extractor edges, and its TEXT affinity would turn every stored code
+/// into a string. `DROP COLUMN` refuses a column an index still names, so
+/// every index on `edges` that mentions the column is dropped first.
 ///
 /// Existing rows read NULL until they are re-indexed; `TokenSave::open`
 /// forces a full index after any migration.
@@ -1673,6 +1711,14 @@ async fn migrate_v18(conn: &Connection) -> Result<()> {
         return Ok(());
     }
     if legacy {
+        for index in indexes_naming(conn, "edges", "resolved_by").await? {
+            conn.execute_batch(&format!("DROP INDEX IF EXISTS \"{index}\";"))
+                .await
+                .map_err(|e| TokenSaveError::Database {
+                    message: format!("v18: failed to drop index {index}: {e}"),
+                    operation: "migrate_v18".to_string(),
+                })?;
+        }
         conn.execute_batch("ALTER TABLE edges DROP COLUMN resolved_by;")
             .await
             .map_err(|e| TokenSaveError::Database {

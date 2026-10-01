@@ -561,7 +561,7 @@ pub(crate) async fn init_and_index(
         "init_and_index: project_path must be absolute"
     );
     let mut cg = if TokenSave::is_initialized(project_path) {
-        TokenSave::open(project_path).await?
+        TokenSave::open_rebuilding_failed_migration(project_path).await?
     } else {
         let cg = TokenSave::init(project_path).await?;
         eprintln!("Initialized TokenSave at {}", project_path.display());

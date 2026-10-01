@@ -431,7 +431,27 @@ impl Edge {
             None => 2,
         }
     }
+
+    /// [`Self::provenance_rank`], then the code itself, so that two
+    /// duplicates of the same rank always collapse to the same label rather
+    /// than to whichever an unstable sort left first.
+    #[must_use]
+    pub fn provenance_key(&self) -> (u8, u8) {
+        (
+            self.provenance_rank(),
+            self.resolved_by.map_or(u8::MAX, |r| r as u8),
+        )
+    }
 }
+
+/// Appended to every edge `INSERT`: a duplicate of an existing edge is still
+/// skipped, but one carrying a provenance fills in a row that has none.
+///
+/// The extractor's own copy of an edge (no provenance) can reach the table
+/// before the resolver's in an incremental sync; without this the first row
+/// won and a sync labelled the edge differently from a full index (#544).
+pub const EDGE_UPSERT_CLAUSE: &str = " ON CONFLICT DO UPDATE SET resolved_by = \
+     excluded.resolved_by WHERE edges.resolved_by IS NULL AND excluded.resolved_by IS NOT NULL";
 
 /// How the resolver bound a reference to its target (#544).
 ///

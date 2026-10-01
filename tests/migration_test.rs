@@ -1551,14 +1551,17 @@ async fn test_migrate_v18_adds_resolved_by() {
 }
 
 /// V18 replaces the leftover `resolved_by TEXT NOT NULL DEFAULT 'direct'`
-/// column of very old databases, which would reject NULL and stringify codes.
+/// column the 5.0-beta v8 migration added, which would reject NULL and
+/// stringify codes. That migration also indexed it, and `DROP COLUMN`
+/// refuses an indexed column, so the fixture carries the index too.
 #[tokio::test]
 async fn test_migrate_v18_replaces_legacy_text_column() {
     let (_dir, conn, _db) = create_raw_db().await;
     create_schema(&conn).await.expect("create_schema");
     conn.execute_batch(
         "ALTER TABLE edges DROP COLUMN resolved_by;
-         ALTER TABLE edges ADD COLUMN resolved_by TEXT NOT NULL DEFAULT 'direct';",
+         ALTER TABLE edges ADD COLUMN resolved_by TEXT NOT NULL DEFAULT 'direct';
+         CREATE INDEX idx_edges_resolved_by ON edges(resolved_by);",
     )
     .await
     .expect("simulate the legacy column");
@@ -1571,6 +1574,7 @@ async fn test_migrate_v18_replaces_legacy_text_column() {
         resolved_by_column(&conn).await,
         Some(("INTEGER".to_string(), 0))
     );
+    assert!(!index_exists(&conn, "idx_edges_resolved_by").await);
     // The legacy value is gone, NULL is accepted, and a code stays an integer.
     conn.execute("DELETE FROM edges", ()).await.expect("clear");
     insert_edge_with(&conn, "NULL").await;
@@ -1596,4 +1600,46 @@ async fn test_migrate_v18_is_idempotent() {
         resolved_by_column(&conn).await,
         Some(("INTEGER".to_string(), 0))
     );
+}
+
+/// A failed migration names the way out, and `sync --force`'s open rebuilds
+/// the database instead of failing the same way again.
+#[tokio::test]
+async fn test_failed_migration_is_recoverable_by_a_forced_rebuild() {
+    use tokensave::tokensave::TokenSave;
+    let dir = TempDir::new().expect("temp dir");
+    std::fs::write(
+        dir.path().join("lib.rs"),
+        "pub fn f() {}\npub fn g() { f() }\n",
+    )
+    .expect("write source");
+    let cg = TokenSave::init(dir.path()).await.expect("init");
+    cg.index_all().await.expect("index");
+    drop(cg);
+
+    // Make v18 fail: a legacy column that a view depends on cannot be dropped.
+    let db_path = dir.path().join(".tokensave/tokensave.db");
+    {
+        let db = Builder::new_local(&db_path).build().await.expect("db");
+        let conn = db.connect().expect("conn");
+        conn.execute_batch(
+            "ALTER TABLE edges DROP COLUMN resolved_by;
+             ALTER TABLE edges ADD COLUMN resolved_by TEXT NOT NULL DEFAULT 'direct';
+             CREATE VIEW legacy_provenance AS SELECT resolved_by FROM edges;
+             PRAGMA user_version = 17;",
+        )
+        .await
+        .expect("simulate a v17 database whose migration fails");
+    }
+
+    let err = match TokenSave::open(dir.path()).await {
+        Ok(_) => panic!("the migration should fail"),
+        Err(e) => e.to_string(),
+    };
+    assert!(err.contains("tokensave sync --force"), "{err}");
+
+    let cg = TokenSave::open_rebuilding_failed_migration(dir.path())
+        .await
+        .expect("a forced rebuild recovers");
+    assert!(!cg.get_nodes_by_name("f").await.expect("query").is_empty());
 }

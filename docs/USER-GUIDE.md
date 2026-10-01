@@ -914,7 +914,7 @@ only files you asked about and the index could not answer for.
 | `ambiguous` | A call the resolver could not decide between this symbol and others | Never |
 | `text_only` | A whole-word mention the graph does not link: a comment, string, doc, or an unlinked identifier in code | Never |
 
-A dry run (the default) returns the plan and a unified diff. Applying refuses while any site is `heuristic` or `ambiguous`, or an unlinked identifier mentions the name, unless `allow_heuristic` is set. The apply is all-or-nothing: every edited file must still parse with tree-sitter without new error nodes, keywords and non-identifiers are refused, and so is a name already used in the same scope. Edited files are reindexed.
+A dry run (the default) returns the plan and a unified diff. Applying refuses while any site is `heuristic` or `ambiguous`, or an unlinked identifier mentions the name, unless `allow_heuristic` is set. The apply is all-or-nothing: every edited file must still parse with tree-sitter without new error nodes, keywords and non-identifiers are refused, and so is a name already used in the same scope. Mentions past the listing cap are counted but not listed, and they still gate an apply, as does a file that mentions the name but is too large or unreadable to check. Lines and columns are 1-based; a column counts bytes, not characters. A symlinked file is edited through its target. The edited files are reindexed together and their references re-resolved, so the renamed symbol keeps its callers.
 
 ### Code quality analysis
 

@@ -322,9 +322,7 @@ impl Database {
 
         // Edges (Contains has already been hoisted out into parent_id)
         for chunk in surviving_edges.chunks(500) {
-            sql.push_str(
-                "INSERT OR IGNORE INTO edges (source,target,kind,line,resolved_by) VALUES ",
-            );
+            sql.push_str("INSERT INTO edges (source,target,kind,line,resolved_by) VALUES ");
             for (i, edge) in chunk.iter().enumerate() {
                 if i > 0 {
                     sql.push(',');
@@ -347,6 +345,7 @@ impl Database {
                 }
                 sql.push(')');
             }
+            sql.push_str(EDGE_UPSERT_CLAUSE);
             sql.push_str(";\n");
         }
 

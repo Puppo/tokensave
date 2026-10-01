@@ -97,10 +97,12 @@ impl Database {
         }
         self.conn()
             .execute(
-                "INSERT OR IGNORE INTO edges (source, target, kind, line, resolved_by) \
-                 SELECT ?1, ?2, ?3, ?4, ?5 \
-                 WHERE EXISTS (SELECT 1 FROM nodes WHERE id = ?1) \
-                   AND EXISTS (SELECT 1 FROM nodes WHERE id = ?2)",
+                &format!(
+                    "INSERT INTO edges (source, target, kind, line, resolved_by) \
+                     SELECT ?1, ?2, ?3, ?4, ?5 \
+                     WHERE EXISTS (SELECT 1 FROM nodes WHERE id = ?1) \
+                       AND EXISTS (SELECT 1 FROM nodes WHERE id = ?2){EDGE_UPSERT_CLAUSE}"
+                ),
                 params![
                     edge.source.as_str(),
                     edge.target.as_str(),
@@ -142,12 +144,12 @@ impl Database {
         // when an edge references a node from a not-yet-indexed file.
         let stmt = self
             .conn()
-            .prepare(
-                "INSERT OR IGNORE INTO edges (source, target, kind, line, resolved_by) \
-                 SELECT ?1, ?2, ?3, ?4, ?5 \
-                 WHERE EXISTS (SELECT 1 FROM nodes WHERE id = ?1) \
-                   AND EXISTS (SELECT 1 FROM nodes WHERE id = ?2)",
-            )
+            .prepare(&format!(
+                "INSERT INTO edges (source, target, kind, line, resolved_by) \
+                     SELECT ?1, ?2, ?3, ?4, ?5 \
+                     WHERE EXISTS (SELECT 1 FROM nodes WHERE id = ?1) \
+                       AND EXISTS (SELECT 1 FROM nodes WHERE id = ?2){EDGE_UPSERT_CLAUSE}"
+            ))
             .await
             .map_err(|e| TokenSaveError::Database {
                 message: format!("failed to prepare: {e}"),

@@ -353,3 +353,211 @@ async fn unknown_node_reports_not_found() {
     let text = result.value["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("Node not found"), "{text}");
 }
+
+async fn project(files: &[(&str, &str)]) -> (TempDir, TokenSave) {
+    let dir = TempDir::new().unwrap();
+    for (path, body) in files {
+        let abs = dir.path().join(path);
+        fs::create_dir_all(abs.parent().unwrap()).unwrap();
+        fs::write(abs, body).unwrap();
+    }
+    let cg = TokenSave::init(dir.path()).await.unwrap();
+    cg.index_all().await.unwrap();
+    (dir, cg)
+}
+
+async fn caller_names(cg: &TokenSave, name: &str) -> Vec<String> {
+    let id = node_id(cg, name).await;
+    let mut out: Vec<String> = Vec::new();
+    for edge in cg.get_incoming_edges(&id).await.unwrap() {
+        if let Some(n) = cg.get_node(&edge.source).await.unwrap() {
+            out.push(n.name);
+        }
+    }
+    out.sort();
+    out
+}
+
+#[tokio::test]
+async fn callers_survive_a_cross_file_rename() {
+    let (dir, cg) = project(&[
+        ("lib.rs", "pub fn inc() -> u32 { 1 }\n"),
+        ("c.rs", "pub fn caller() -> u32 { inc() }\n"),
+    ])
+    .await;
+    assert_eq!(caller_names(&cg, "inc").await, vec!["caller".to_string()]);
+
+    let applied = call(
+        &cg,
+        "tokensave_rename",
+        json!({"symbol": "inc", "new_name": "incr", "dry_run": false}),
+    )
+    .await;
+    assert_eq!(applied["applied"], true, "{applied:#}");
+    assert_eq!(
+        read(dir.path(), "c.rs"),
+        "pub fn caller() -> u32 { incr() }\n"
+    );
+    assert_eq!(caller_names(&cg, "incr").await, vec!["caller".to_string()]);
+
+    // A sync changes nothing, and a second rename sees the call as exact.
+    cg.sync().await.unwrap();
+    assert_eq!(caller_names(&cg, "incr").await, vec!["caller".to_string()]);
+    let plan = call(
+        &cg,
+        "tokensave_rename",
+        json!({"symbol": "incr", "new_name": "increment"}),
+    )
+    .await;
+    let sites = sites(&plan);
+    assert!(
+        sites.contains(&("c.rs".into(), 1, "exact".into(), "calls".into())),
+        "{sites:?}"
+    );
+}
+
+#[tokio::test]
+async fn unlinked_identifiers_past_the_listing_cap_still_gate_apply() {
+    // 250 comment mentions in a file sorted first push the local `bump` in
+    // z.rs past the 200-entry listing cap.
+    let notes: String = (0..250).map(|_| "// bump\n").collect();
+    let (dir, cg) = project(&[
+        ("a_notes.rs", notes.as_str()),
+        (
+            "lib.rs",
+            "pub fn bump() -> u32 { 1 }\npub fn caller() -> u32 { bump() }\n",
+        ),
+        (
+            "z.rs",
+            "pub fn z() -> u32 {\n    let bump = 5;\n    bump + 1\n}\n",
+        ),
+    ])
+    .await;
+    let result = call(
+        &cg,
+        "tokensave_rename",
+        json!({"symbol": "bump", "new_name": "bumped", "dry_run": false}),
+    )
+    .await;
+    assert_eq!(result["applied"], false, "{result:#}");
+    assert!(
+        result["unlinked_code_omitted"].as_u64().unwrap() >= 2,
+        "{result:#}"
+    );
+    assert!(
+        result["refused"].as_str().unwrap().contains("not exact"),
+        "{result:#}"
+    );
+    assert!(read(dir.path(), "lib.rs").contains("pub fn bump()"));
+}
+
+#[tokio::test]
+async fn a_file_too_large_to_scan_gates_apply() {
+    let (dir, cg) = project(&[
+        (
+            "lib.rs",
+            "pub fn bump() -> u32 { 1 }\npub fn caller() -> u32 { bump() }\n",
+        ),
+        ("z.rs", "pub fn z() -> u32 { 1 }\n"),
+    ])
+    .await;
+    // Grows past the scan limit after indexing, with a mention at the end.
+    let mut big = "// filler line\n".repeat(150_000);
+    big.push_str("pub fn y() -> u32 { bump() }\n");
+    fs::write(dir.path().join("z.rs"), big).unwrap();
+
+    let result = call(
+        &cg,
+        "tokensave_rename",
+        json!({"symbol": "bump", "new_name": "bumped", "dry_run": false}),
+    )
+    .await;
+    assert_eq!(result["applied"], false, "{result:#}");
+    let unscanned = result["unscanned"].as_array().unwrap();
+    assert!(
+        unscanned[0].as_str().unwrap().starts_with("z.rs"),
+        "{unscanned:?}"
+    );
+    assert!(result["refused"]
+        .as_str()
+        .unwrap()
+        .contains("could not be checked"));
+    assert!(read(dir.path(), "lib.rs").contains("pub fn bump()"));
+}
+
+#[tokio::test]
+async fn columns_are_byte_columns_and_crlf_tabs_and_utf8_survive() {
+    let caller = "pub fn caller() -> usize {\r\n\tlet s = \"é€😀\"; compute(s)\r\n}\r\n";
+    let (dir, cg) = project(&[
+        ("lib.rs", "pub fn compute(s: &str) -> usize { s.len() }\r\n"),
+        ("c.rs", caller),
+    ])
+    .await;
+    let plan = call(
+        &cg,
+        "tokensave_rename",
+        json!({"symbol": "compute", "new_name": "measure"}),
+    )
+    .await;
+    let site = plan["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["file"] == "c.rs")
+        .unwrap_or_else(|| panic!("{plan:#}"))["sites"][0]
+        .clone();
+    // `\t` (1) + `let s = "` (9) + `é€😀` (2 + 3 + 4 bytes) + `"; ` (3) = 22
+    // bytes before the name: byte column 23, where a char column would be 17.
+    assert_eq!(site["line"], 2, "{site}");
+    assert_eq!(site["column"], 23, "{site}");
+    assert_eq!(site["end_column"], 30, "{site}");
+
+    let applied = call(
+        &cg,
+        "tokensave_rename",
+        json!({"symbol": "compute", "new_name": "measure", "dry_run": false}),
+    )
+    .await;
+    assert_eq!(applied["applied"], true, "{applied:#}");
+    assert_eq!(
+        read(dir.path(), "c.rs"),
+        caller.replace("compute", "measure")
+    );
+    assert_eq!(
+        read(dir.path(), "lib.rs"),
+        "pub fn measure(s: &str) -> usize { s.len() }\r\n"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_symlinked_file_is_edited_through_its_target() {
+    let outside = TempDir::new().unwrap();
+    let target = outside.path().join("c_target.rs");
+    fs::write(&target, "pub fn caller() -> u32 { inc() }\n").unwrap();
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join("lib.rs"), "pub fn inc() -> u32 { 1 }\n").unwrap();
+    std::os::unix::fs::symlink(&target, dir.path().join("c.rs")).unwrap();
+    let cg = TokenSave::init(dir.path()).await.unwrap();
+    cg.index_all().await.unwrap();
+
+    let applied = call(
+        &cg,
+        "tokensave_rename",
+        json!({"symbol": "inc", "new_name": "incr", "dry_run": false}),
+    )
+    .await;
+    assert_eq!(applied["applied"], true, "{applied:#}");
+    let link = dir.path().join("c.rs");
+    assert!(
+        fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the link must stay a link"
+    );
+    assert_eq!(
+        fs::read_to_string(&target).unwrap(),
+        "pub fn caller() -> u32 { incr() }\n"
+    );
+}

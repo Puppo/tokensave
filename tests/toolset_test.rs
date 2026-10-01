@@ -69,9 +69,13 @@ async fn listed_tool_names(server: &Arc<McpServer>) -> Vec<String> {
 async fn the_default_toolset_lists_every_tool() {
     let (_dir, server) = setup_server(None).await;
     let names = listed_tool_names(&server).await;
+    // Every tool but the hidden aliases (`tokensave_rename_preview`, #568).
     assert_eq!(
         names.len(),
-        tokensave::mcp::tools::get_tool_definitions().len()
+        tokensave::mcp::tools::get_tool_definitions()
+            .iter()
+            .filter(|d| !tokensave::mcp::tools::is_hidden_tool(d))
+            .count()
     );
     assert!(names.len() > CORE_TOOLS.len());
 }

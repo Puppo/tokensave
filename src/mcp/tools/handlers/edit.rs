@@ -501,7 +501,7 @@ async fn rename(cg: &TokenSave, args: &Value, dry_run: bool) -> Result<ToolResul
         "new_name": plan.new_name,
         "dry_run": dry_run,
         "allow_heuristic": allow_heuristic,
-        "note": "graph-based, not binding-aware: see the confidence classes in the tool description",
+        "note": "graph-based, not binding-aware: see the confidence classes in the tool description. line and column are 1-based; column counts bytes, not characters",
         "counts": plan.counts(),
         "files": files,
         "text_only": text_only,
@@ -512,16 +512,29 @@ async fn rename(cg: &TokenSave, args: &Value, dry_run: bool) -> Result<ToolResul
     if !plan.warnings.is_empty() {
         output["warnings"] = json!(plan.warnings);
     }
+    if plan.unlinked_code_omitted > 0 {
+        output["unlinked_code_omitted"] = json!(plan.unlinked_code_omitted);
+    }
+    if !plan.unscanned.is_empty() {
+        output["unscanned"] = json!(plan.unscanned);
+    }
 
     if dry_run {
-        let non_exact = plan.non_exact_sites().len();
+        let non_exact = plan.non_exact_sites().len() + plan.unlinked_code_omitted;
+        let unchecked = !plan.unscanned.is_empty();
         output["apply"] = json!(if !plan.blockers.is_empty() {
             "would refuse: see blockers".to_string()
         } else if plan.new_name.is_none() {
             "pass new_name to preview and apply the edit".to_string()
-        } else if non_exact > 0 && !allow_heuristic {
+        } else if (non_exact > 0 || unchecked) && !allow_heuristic {
             format!(
-                "would refuse: {non_exact} non-exact site(s); the diff shows the exact sites only"
+                "would refuse: {non_exact} non-exact site(s){}; the diff shows the exact sites \
+                 only",
+                if unchecked {
+                    ", and files that mention the name could not be checked (see unscanned)"
+                } else {
+                    ""
+                }
             )
         } else {
             "would edit the sites in the diff".to_string()

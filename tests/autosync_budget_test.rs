@@ -45,6 +45,7 @@ async fn backdate_last_sync(server: &McpServer) {
         - 3_600;
     server
         .cg()
+        .expect("default project")
         .db()
         .set_metadata("last_sync_at", &long_ago.to_string())
         .await

@@ -807,17 +807,14 @@ impl TokenSave {
     /// the global DB happens regardless — this governs only what the agent is
     /// shown and asked to narrate.
     pub fn report_savings(&self) -> bool {
-        crate::config::env_bool_override("TOKENSAVE_REPORT_SAVINGS", self.config.report_savings)
+        crate::config::resolve_report_savings(self.config.report_savings)
     }
 
     /// Resolves the toolset the MCP server lists (#576) from the project
     /// config, letting the `TOKENSAVE_TOOLS` env var override it per-run. A
     /// value that names no toolset is ignored.
     pub fn toolset(&self) -> crate::config::Toolset {
-        std::env::var("TOKENSAVE_TOOLS")
-            .ok()
-            .and_then(|value| crate::config::Toolset::parse(&value))
-            .unwrap_or(self.config.tools)
+        crate::config::Toolset::resolve(self.config.tools)
     }
 
     /// Recompute the on-disk path to the `SQLite` DB this instance is

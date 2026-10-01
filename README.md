@@ -420,7 +420,7 @@ Different from the criterion bench above: criterion measures per-iteration laten
 
 ## 80+ MCP Tools
 
-The server exposes more than 80 tools (one fewer when the optional `ast-grep` binary is not on `PATH`); the tables below group the most commonly used ones by category. Most are read-only, safe to call in parallel, and annotated with `readOnlyHint`. The edit primitives are scoped to single files and re-index in place; session baseline and memory-recording tools also mutate local `.tokensave` state and are annotated as non-read-only. The three core tools (`tokensave_context`, `tokensave_search`, `tokensave_status`) are marked `anthropic/alwaysLoad` so they bypass the client's tool-search round-trip.
+The server exposes more than 80 tools (one fewer when the optional `ast-grep` binary is not on `PATH`). Since 7.14.0 only the 11 core tools plus `tokensave_more` are listed by default; the rest are listed on demand through `tokensave_more`, stay callable by name, and are all listed with `"tools": "full"`. The tables below group the most commonly used ones by category. Most are read-only, safe to call in parallel, and annotated with `readOnlyHint`. The edit primitives are scoped to single files and re-index in place; session baseline and memory-recording tools also mutate local `.tokensave` state and are annotated as non-read-only. The three core tools (`tokensave_context`, `tokensave_search`, `tokensave_status`) are marked `anthropic/alwaysLoad` so they bypass the client's tool-search round-trip.
 
 ### Query another initialized project
 

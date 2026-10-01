@@ -360,6 +360,10 @@ tokensave serve
 
 This starts the MCP server over stdio. You normally don't need to run this yourself — the agent integration handles it. But it's useful for debugging or connecting custom tools.
 
+#### Starting outside a project
+
+If `serve` starts in a folder that is not inside an indexed project (a scratch folder, a session with no project, or `-p` pointing at a folder with no index), it no longer exits. It starts with **no default project**: `initialize` succeeds and lists the registered projects, and every tool call passes `graph_root` with one of them. `tokensave_status` without `graph_root` answers with that list. Any other call without `graph_root` gets an error that names the registered projects. An explicit `-p` without an index never falls back to another project; without `-p`, the only registered project is still served as before.
+
 ### Working from a subdirectory
 
 You can open your AI agent from any subdirectory of an indexed project. Tokensave will walk up the directory tree to find the nearest `.tokensave/` database — similar to how git finds `.git/`.
@@ -1108,7 +1112,7 @@ Rust, Go, Java, Scala, TypeScript, JavaScript, Python, C, C++, Kotlin, C#, Swift
 
 Adds scripting, config, and additional systems languages.
 
-Dart, Pascal, PHP, Ruby, Bash, Protobuf, PowerShell, Nix, VB.NET
+Dart, Pascal, PHP, Ruby (including `.rake` task files), Bash, Protobuf, PowerShell, Nix, VB.NET
 
 ### Full (Medium + everything else, the default)
 
@@ -1217,7 +1221,7 @@ scoop update tokensave          # Scoop
 cargo install tokensave         # Cargo
 ```
 
-Upgrades are zero-touch: you normally do **not** need to re-run `install` or `sync --force` by hand. Tokensave compares the version that last ran against the running one and performs exactly the maintenance that transition requires — refreshing every registered agent's config on a minor or major bump, and rebuilding project indexes on a major one. That refresh is silent; it will not print install output in front of your next `init` or `sync`. See [TOKENSAVE-VERSIONING.md](../TOKENSAVE-VERSIONING.md) for the full rules.
+Upgrades are zero-touch: you normally do **not** need to re-run `install` or `sync --force` by hand. Tokensave compares the version that last ran against the running one and performs exactly the maintenance that transition requires — refreshing every registered agent's config on a minor or major bump, and rebuilding project indexes on a major one. That refresh is silent; it will not print install output in front of your next `init` or `sync`. It also rewrites tokensave's own section of any git hooks already installed (the global ones, and the current repository's), so hook fixes reach you too; it never installs a hook you didn't have. `tokensave reinstall` does the same on demand, and `doctor` reports a hook whose tokensave section is out of date. See [TOKENSAVE-VERSIONING.md](../TOKENSAVE-VERSIONING.md) for the full rules.
 
 The two cases where you should still step in:
 

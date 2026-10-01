@@ -56,6 +56,7 @@ fn sample_edge(source: &str, target: &str, kind: EdgeKind) -> Edge {
         target: target.to_string(),
         kind,
         line: Some(5),
+        resolved_by: None,
     }
 }
 
@@ -440,13 +441,15 @@ async fn test_insert_edges_null_line_with_missing() {
             source: "nl-a".to_string(),
             target: "nl-b".to_string(),
             kind: EdgeKind::Calls,
-            line: None, // valid, null line
+            line: None, // valid, null line,
+            resolved_by: None,
         },
         Edge {
             source: "nl-a".to_string(),
             target: "missing".to_string(),
             kind: EdgeKind::Uses,
-            line: None, // missing target, null line
+            line: None, // missing target, null line,
+            resolved_by: None,
         },
     ];
     db.insert_edges(&edges).await.expect("insert_edges failed");
@@ -801,12 +804,14 @@ async fn test_get_inheritance_depth() {
             target: "ih-p".to_string(),
             kind: EdgeKind::Extends,
             line: None,
+            resolved_by: None,
         },
         Edge {
             source: "ih-p".to_string(),
             target: "ih-gp".to_string(),
             kind: EdgeKind::Extends,
             line: None,
+            resolved_by: None,
         },
     ];
     db.insert_edges(&edges).await.expect("insert_edges failed");
@@ -853,18 +858,21 @@ async fn test_get_inheritance_depth_terminates_on_cycle() {
             target: "ih-cy-b".into(),
             kind: EdgeKind::Extends,
             line: None,
+            resolved_by: None,
         },
         Edge {
             source: "ih-cy-b".into(),
             target: "ih-cy-a".into(),
             kind: EdgeKind::Extends,
             line: None,
+            resolved_by: None,
         },
         Edge {
             source: "ih-cy-c".into(),
             target: "ih-cy-a".into(),
             kind: EdgeKind::Extends,
             line: None,
+            resolved_by: None,
         },
     ];
     db.insert_edges(&edges).await.expect("insert_edges failed");
@@ -1266,24 +1274,28 @@ async fn test_get_god_classes() {
             target: "gc-m1".to_string(),
             kind: EdgeKind::Contains,
             line: None,
+            resolved_by: None,
         },
         Edge {
             source: "gc-class".to_string(),
             target: "gc-m2".to_string(),
             kind: EdgeKind::Contains,
             line: None,
+            resolved_by: None,
         },
         Edge {
             source: "gc-class".to_string(),
             target: "gc-f1".to_string(),
             kind: EdgeKind::Contains,
             line: None,
+            resolved_by: None,
         },
         Edge {
             source: "gc-class".to_string(),
             target: "gc-ctor".to_string(),
             kind: EdgeKind::Contains,
             line: None,
+            resolved_by: None,
         },
     ];
     db.insert_edges(&edges).await.expect("insert_edges failed");
@@ -1942,36 +1954,42 @@ async fn test_get_god_classes_multiple_classes() {
             target: "gcm-m1".into(),
             kind: EdgeKind::Contains,
             line: None,
+            resolved_by: None,
         },
         Edge {
             source: "gcm-big".into(),
             target: "gcm-m2".into(),
             kind: EdgeKind::Contains,
             line: None,
+            resolved_by: None,
         },
         Edge {
             source: "gcm-big".into(),
             target: "gcm-m3".into(),
             kind: EdgeKind::Contains,
             line: None,
+            resolved_by: None,
         },
         Edge {
             source: "gcm-big".into(),
             target: "gcm-f1".into(),
             kind: EdgeKind::Contains,
             line: None,
+            resolved_by: None,
         },
         Edge {
             source: "gcm-big".into(),
             target: "gcm-f2".into(),
             kind: EdgeKind::Contains,
             line: None,
+            resolved_by: None,
         },
         Edge {
             source: "gcm-small".into(),
             target: "gcm-sm1".into(),
             kind: EdgeKind::Contains,
             line: None,
+            resolved_by: None,
         },
     ];
     db.insert_edges(&edges).await.expect("insert_edges failed");
@@ -2015,6 +2033,7 @@ async fn test_edge_line_none_and_some() {
         target: "eln-2".to_string(),
         kind: EdgeKind::Calls,
         line: None,
+        resolved_by: None,
     };
     db.insert_edge(&edge_no_line)
         .await
@@ -2026,6 +2045,7 @@ async fn test_edge_line_none_and_some() {
         target: "eln-2".to_string(),
         kind: EdgeKind::Calls,
         line: Some(42),
+        resolved_by: None,
     };
     db.insert_edge(&edge_with_line)
         .await
@@ -2056,6 +2076,7 @@ async fn test_edge_unique_constraint_dedup() {
         target: "euc-2".to_string(),
         kind: EdgeKind::Calls,
         line: Some(10),
+        resolved_by: None,
     };
     db.insert_edge(&edge).await.expect("insert_edge failed");
     db.insert_edge(&edge)
@@ -2237,6 +2258,7 @@ async fn test_batch_incoming_call_counts() {
             target: tgt.to_string(),
             kind: EdgeKind::Calls,
             line: None,
+            resolved_by: None,
         })
         .await
         .unwrap();

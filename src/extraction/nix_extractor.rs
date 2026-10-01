@@ -240,6 +240,7 @@ impl NixExtractor {
                         target: id.clone(),
                         kind: EdgeKind::Contains,
                         line: Some(start_line),
+                        resolved_by: None,
                     });
                 }
 
@@ -308,6 +309,7 @@ impl NixExtractor {
                         target: id.clone(),
                         kind: EdgeKind::Contains,
                         line: Some(start_line),
+                        resolved_by: None,
                     });
                 }
 
@@ -375,6 +377,7 @@ impl NixExtractor {
                         target: id.clone(),
                         kind: EdgeKind::Contains,
                         line: Some(start_line),
+                        resolved_by: None,
                     });
                 }
 
@@ -502,6 +505,7 @@ impl NixExtractor {
                                         target: id.clone(),
                                         kind: EdgeKind::Contains,
                                         line: Some(attr_line),
+                                        resolved_by: None,
                                     });
                                 }
 
@@ -728,6 +732,7 @@ impl NixExtractor {
                                         target: id,
                                         kind: EdgeKind::Contains,
                                         line: Some(start_line),
+                                        resolved_by: None,
                                     });
                                 }
                             }
@@ -947,6 +952,7 @@ impl NixExtractor {
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 

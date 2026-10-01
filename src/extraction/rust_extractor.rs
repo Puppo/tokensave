@@ -246,6 +246,7 @@ impl RustExtractor {
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 
@@ -338,6 +339,7 @@ impl RustExtractor {
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 
@@ -406,6 +408,7 @@ impl RustExtractor {
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 
@@ -473,6 +476,7 @@ impl RustExtractor {
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 
@@ -596,6 +600,7 @@ impl RustExtractor {
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 
@@ -680,6 +685,7 @@ impl RustExtractor {
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 
@@ -747,6 +753,7 @@ impl RustExtractor {
                 target: id,
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
     }
@@ -804,6 +811,7 @@ impl RustExtractor {
                 target: id,
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
     }
@@ -861,6 +869,7 @@ impl RustExtractor {
                 target: id,
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
     }
@@ -916,6 +925,7 @@ impl RustExtractor {
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 
@@ -1164,6 +1174,7 @@ impl RustExtractor {
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 
@@ -1241,6 +1252,7 @@ impl RustExtractor {
                 target: id,
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
     }
@@ -1832,6 +1844,7 @@ impl RustExtractor {
             target: target_id.to_string(),
             kind: EdgeKind::Annotates,
             line: Some(start_line),
+            resolved_by: None,
         });
     }
 

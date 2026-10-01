@@ -163,6 +163,31 @@ pub fn is_graph_scoped_tool(definition: &ToolDefinition) -> bool {
         .unwrap_or(false)
 }
 
+/// Mark a tool that stays callable but is never sent in `tools/list`: an
+/// alias kept so existing callers and permission lists keep working while
+/// new callers see only its replacement.
+fn hidden(mut definition: ToolDefinition) -> ToolDefinition {
+    let Some(meta) = definition
+        .meta
+        .get_or_insert_with(|| json!({}))
+        .as_object_mut()
+    else {
+        panic!("tool metadata must be an object");
+    };
+    meta.insert("tokensave/hidden".to_string(), json!(true));
+    definition
+}
+
+/// Whether a tool is a hidden alias (see [`hidden`]).
+pub fn is_hidden_tool(definition: &ToolDefinition) -> bool {
+    definition
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get("tokensave/hidden"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 /// Mark a read-only local-graph tool that has no `graph_root`/`graph_branch`
 /// selectors, so the branch-drift gate refuses it once the served branch has
 /// drifted. Deriving the refused set from this marker (instead of a
@@ -266,6 +291,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         def_delete_symbol(),
         def_replace_lines(),
         def_ast_grep_rewrite(),
+        def_rename(),
         graph_scoped(def_gini()),
         graph_scoped(def_dependency_depth()),
         graph_scoped(def_health()),
@@ -388,7 +414,7 @@ pub const TOOL_AREAS: &[(&str, &str, &[&str])] = &[
     ),
     (
         "edit",
-        "symbol-level and line-level edits, ast-grep rewrite, rename preview",
+        "symbol-level and line-level edits, ast-grep rewrite, graph-based rename",
         &[
             "tokensave_insert_at",
             "tokensave_delete_symbol",
@@ -396,7 +422,7 @@ pub const TOOL_AREAS: &[(&str, &str, &[&str])] = &[
             "tokensave_ast_grep_rewrite",
             "tokensave_replace_symbol",
             "tokensave_insert_at_symbol",
-            "tokensave_rename_preview",
+            "tokensave_rename",
         ],
     ),
     (
@@ -490,6 +516,7 @@ pub fn get_listed_tool_definitions(
     revealed_areas: &std::collections::BTreeSet<String>,
 ) -> Vec<ToolDefinition> {
     let mut definitions = get_tool_definitions();
+    definitions.retain(|d| !is_hidden_tool(d));
     if toolset == crate::config::Toolset::Full {
         return definitions;
     }
@@ -1170,20 +1197,83 @@ fn def_similar() -> ToolDefinition {
     )
 }
 
+/// Hidden alias kept for callers of the pre-#568 tool: dispatches to
+/// `tokensave_rename` with `dry_run` forced on. Not sent in `tools/list`
+/// (see [`is_hidden_tool`]), but still a known tool for dispatch,
+/// permission lists and `tokensave tool`.
 fn def_rename_preview() -> ToolDefinition {
-    def(
+    hidden(def(
         "tokensave_rename_preview",
-        "References",
-        "Show all references to a symbol -- all edges where the node appears as source or target.",
+        "Rename Preview",
+        "Deprecated alias of tokensave_rename with dry_run=true: lists the rename sites of a \
+         symbol with their confidence class, without editing.",
         json!({
             "type": "object",
             "properties": {
                 "node_id": {
                     "type": "string",
-                    "description": "The unique node ID to find references for"
+                    "description": "The unique node ID to find rename sites for"
+                },
+                "new_name": {
+                    "type": "string",
+                    "description": "Optional new name, to include a diff preview"
                 }
             },
             "required": ["node_id"]
+        }),
+    ))
+}
+
+/// The `tokensave_rename` description. States what the tool is not, so a
+/// caller does not read a binding-aware guarantee into it (#568).
+pub const RENAME_DESCRIPTION: &str = "Rename a symbol at its definition and every reference \
+     the code graph records. Graph-based, NOT binding-aware: references come from a name-based \
+     resolver, not each language's scope rules, so shadowing, dynamic calls or `**kwargs` can \
+     be missed. Each site has a class: `exact` = bound by a qualified path, typed receiver, \
+     import, or a name no other symbol has, located to one token; `heuristic` = bound by a \
+     name fallback (`recv.method` tail, scoring among same-named candidates, blocklisted \
+     names, build variants), an override paired by name, or a token not distinguishable on its \
+     line; `ambiguous` = a call the resolver could not decide; `text_only` = a whole-word \
+     mention the graph does not link (comment, string, doc, unlinked identifier). dry_run \
+     (default true) returns sites by file, counts per class and a unified diff. Applying \
+     refuses while any site is heuristic or ambiguous, or an unlinked identifier exists, unless \
+     allow_heuristic=true; ambiguous and text_only sites are never edited. All-or-nothing: \
+     every changed file must re-parse without new errors; keywords and same-scope collisions \
+     are refused.";
+
+fn def_rename() -> ToolDefinition {
+    def_rw(
+        "tokensave_rename",
+        "Rename Symbol",
+        RENAME_DESCRIPTION,
+        json!({
+            "type": "object",
+            "properties": {
+                "node_id": {
+                    "type": "string",
+                    "description": "Node ID of the symbol to rename. Either this or `symbol`."
+                },
+                "symbol": {
+                    "type": "string",
+                    "description": "Symbol name or qualified name, resolved like tokensave_replace_symbol (callables win a tie; still ambiguous is refused)."
+                },
+                "new_name": {
+                    "type": "string",
+                    "description": "The new identifier. Required to apply; optional for a dry run."
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "Return the plan and diff without editing. Default true."
+                },
+                "allow_heuristic": {
+                    "type": "boolean",
+                    "description": "Also edit heuristic sites, instead of refusing while any exist. Default false."
+                },
+                "project_root": {
+                    "type": "string",
+                    "description": "Optional absolute directory to resolve the index-relative file paths against instead of the indexed project root, e.g. a checkout with the same layout. Alias: `cwd`."
+                }
+            }
         }),
     )
 }
@@ -3075,6 +3165,7 @@ mod tests {
             "tokensave_delete_symbol",
             "tokensave_dependencies",
             "tokensave_diff",
+            "tokensave_rename",
             "tokensave_insert_at",
             "tokensave_insert_at_symbol",
             "tokensave_log",
@@ -3139,9 +3230,13 @@ mod tests {
                 definition.name
             );
         }
+        // Hidden aliases (`tokensave_rename_preview`) are dispatched but
+        // never listed.
+        let listed = all.iter().filter(|d| !is_hidden_tool(d)).count();
+        assert!(listed < all.len());
         assert_eq!(
             get_listed_tool_definitions(Toolset::Full, &none).len(),
-            all.len()
+            listed
         );
     }
 
@@ -3179,11 +3274,12 @@ mod tests {
             assert!(listed.iter().any(|d| d.name == MORE_TOOL));
             total += listed.len() - CORE_TOOLS.len() - 1;
         }
-        assert_eq!(total, all.len(), "the areas must reach every tool once");
+        let listable = all.iter().filter(|d| !is_hidden_tool(d)).count();
+        assert_eq!(total, listable, "the areas must reach every tool once");
 
         let everything = BTreeSet::from(["all".to_string()]);
         let listed = get_listed_tool_definitions(Toolset::Core, &everything);
-        assert_eq!(listed.len(), all.len());
+        assert_eq!(listed.len(), listable);
         assert!(listed.iter().all(|d| d.name != MORE_TOOL));
     }
 

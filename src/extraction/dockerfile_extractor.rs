@@ -238,6 +238,7 @@ impl DockerfileExtractor {
                     target: id.clone(),
                     kind: EdgeKind::Contains,
                     line: Some(start_line),
+                    resolved_by: None,
                 });
             }
 
@@ -288,6 +289,7 @@ impl DockerfileExtractor {
                     target: id,
                     kind: EdgeKind::Contains,
                     line: Some(start_line),
+                    resolved_by: None,
                 });
             }
         }
@@ -365,6 +367,7 @@ impl DockerfileExtractor {
                 target: id,
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
     }
@@ -426,6 +429,7 @@ impl DockerfileExtractor {
                 target: id,
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
     }
@@ -489,6 +493,7 @@ impl DockerfileExtractor {
                             target: id,
                             kind: EdgeKind::Contains,
                             line: Some(start_line),
+                            resolved_by: None,
                         });
                     }
                 }
@@ -562,6 +567,7 @@ impl DockerfileExtractor {
                             target: id,
                             kind: EdgeKind::Contains,
                             line: Some(start_line),
+                            resolved_by: None,
                         });
                     }
                 }
@@ -611,6 +617,7 @@ impl DockerfileExtractor {
                                 target,
                                 kind: EdgeKind::Uses,
                                 line: Some(start_line),
+                                resolved_by: None,
                             });
                         }
                     }

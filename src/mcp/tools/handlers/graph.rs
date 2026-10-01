@@ -1,5 +1,5 @@
 //! Graph traversal tool handlers: `search`, `context`, `callers`, `callees`,
-//! `impact`, `node`, `similar`, `rename_preview`, `callers_for`, `by_qualified_name`,
+//! `impact`, `node`, `similar`, `callers_for`, `by_qualified_name`,
 //! `signature`.
 
 use std::collections::{HashMap, HashSet};
@@ -1194,92 +1194,6 @@ pub(super) async fn handle_similar(cg: &TokenSave, args: Value) -> Result<ToolRe
     Ok(ToolResult {
         value: json!({
             "content": [{ "type": "text", "text": truncate_response(&output) }]
-        }),
-        touched_files,
-    })
-}
-
-/// Handles `tokensave_rename_preview` tool calls.
-pub(super) async fn handle_rename_preview(cg: &TokenSave, args: Value) -> Result<ToolResult> {
-    let node_id = require_node_id(&args)?;
-
-    // Get the node itself
-    let node = cg.get_node(node_id).await?;
-    let node_info = match &node {
-        Some(n) => json!({
-            "id": n.id,
-            "name": n.name,
-            "kind": n.kind.as_str(),
-            "file": n.file_path,
-            "line": super::display_line(n.start_line),
-        }),
-        None => {
-            return Ok(ToolResult {
-                value: json!({
-                    "content": [{ "type": "text", "text": format!("Node not found: {}", node_id) }]
-                }),
-                touched_files: vec![],
-            });
-        }
-    };
-
-    // Get all edges referencing this node
-    let incoming = cg.get_incoming_edges(node_id).await?;
-    let outgoing = cg.get_outgoing_edges(node_id).await?;
-
-    let mut references: Vec<Value> = Vec::new();
-    let mut touched: Vec<String> = Vec::new();
-
-    if let Some(ref n) = node {
-        touched.push(n.file_path.clone());
-    }
-
-    // Incoming edges: other nodes that reference this node
-    for edge in &incoming {
-        if let Some(source_node) = cg.get_node(&edge.source).await? {
-            touched.push(source_node.file_path.clone());
-            references.push(json!({
-                "direction": "incoming",
-                "node_id": source_node.id,
-                "name": source_node.name,
-                "kind": source_node.kind.as_str(),
-                "file": source_node.file_path,
-                "line": super::display_line(source_node.start_line),
-                "edge_kind": edge.kind.as_str(),
-                "edge_line": edge.line,
-            }));
-        }
-    }
-
-    // Outgoing edges: nodes this node references
-    for edge in &outgoing {
-        if let Some(target_node) = cg.get_node(&edge.target).await? {
-            touched.push(target_node.file_path.clone());
-            references.push(json!({
-                "direction": "outgoing",
-                "node_id": target_node.id,
-                "name": target_node.name,
-                "kind": target_node.kind.as_str(),
-                "file": target_node.file_path,
-                "line": super::display_line(target_node.start_line),
-                "edge_kind": edge.kind.as_str(),
-                "edge_line": edge.line,
-            }));
-        }
-    }
-
-    let touched_files = unique_file_paths(touched.iter().map(std::string::String::as_str));
-
-    let output = json!({
-        "node": node_info,
-        "reference_count": references.len(),
-        "references": references,
-    });
-
-    let formatted = serde_json::to_string_pretty(&output).unwrap_or_default();
-    Ok(ToolResult {
-        value: json!({
-            "content": [{ "type": "text", "text": truncate_response(&formatted) }]
         }),
         touched_files,
     })

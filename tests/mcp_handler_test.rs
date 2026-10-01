@@ -866,12 +866,21 @@ async fn test_rename_preview() {
     )
     .await
     .unwrap();
+    // A hidden alias of `tokensave_rename` with dry_run forced on (#568).
     let text = extract_text(&result.value);
-    assert!(
-        text.contains("reference_count"),
-        "should have reference_count key"
-    );
-    assert!(text.contains("node"), "should have node key");
+    let plan: Value = serde_json::from_str(text).expect("rename plan is JSON");
+    assert_eq!(plan["dry_run"], true);
+    assert_eq!(plan["symbol"]["name"], "helper");
+    assert!(plan["counts"]["exact"].as_u64().unwrap() >= 1, "{plan:#}");
+    // The definition and the call from main.rs are both rename sites.
+    let files: Vec<&str> = plan["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["file"].as_str().unwrap())
+        .collect();
+    assert!(files.contains(&"src/utils.rs"), "{plan:#}");
+    assert!(files.contains(&"src/main.rs"), "{plan:#}");
 }
 
 // ---------------------------------------------------------------------------
@@ -1391,7 +1400,7 @@ async fn test_search_populates_touched_files() {
 }
 
 // ---------------------------------------------------------------------------
-// Extra: rename_preview with nonexistent node
+// Extra: rename_preview (alias of tokensave_rename) with nonexistent node
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -6222,6 +6231,7 @@ pub fn residual_vector<T: LinearOperator>(operator: &T, x: &[f64], ax: &mut [f64
             target: sources[0].id.clone(),
             kind: tokensave::types::EdgeKind::Calls,
             line: Some(14),
+            resolved_by: None,
         }])
         .await
         .unwrap();
@@ -6370,36 +6380,42 @@ async fn affected_classifies_candidates_and_includes_inline_sources_in_suite() {
                 target: changed.clone(),
                 kind: tokensave::types::EdgeKind::Calls,
                 line: Some(1),
+                resolved_by: None,
             },
             tokensave::types::Edge {
                 source: direct,
                 target: changed.clone(),
                 kind: tokensave::types::EdgeKind::Calls,
                 line: Some(1),
+                resolved_by: None,
             },
             tokensave::types::Edge {
                 source: facade.clone(),
                 target: changed.clone(),
                 kind: tokensave::types::EdgeKind::Calls,
                 line: Some(1),
+                resolved_by: None,
             },
             tokensave::types::Edge {
                 source: integration,
                 target: facade,
                 kind: tokensave::types::EdgeKind::Calls,
                 line: Some(3),
+                resolved_by: None,
             },
             tokensave::types::Edge {
                 source: bridge.clone(),
                 target: changed,
                 kind: tokensave::types::EdgeKind::Calls,
                 line: Some(1),
+                resolved_by: None,
             },
             tokensave::types::Edge {
                 source: consumer,
                 target: bridge,
                 kind: tokensave::types::EdgeKind::Calls,
                 line: Some(1),
+                resolved_by: None,
             },
         ])
         .await

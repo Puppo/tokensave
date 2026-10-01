@@ -194,6 +194,7 @@ impl CExtractor {
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 
@@ -325,6 +326,7 @@ impl CExtractor {
                 target: id,
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
     }
@@ -394,6 +396,7 @@ impl CExtractor {
                 target: id,
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
     }
@@ -533,6 +536,7 @@ impl CExtractor {
                 target: typedef_id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 
@@ -609,6 +613,7 @@ impl CExtractor {
                 target: typedef_id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 
@@ -685,6 +690,7 @@ impl CExtractor {
                 target: typedef_id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 
@@ -755,6 +761,7 @@ impl CExtractor {
                 target: id,
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
     }
@@ -834,6 +841,7 @@ impl CExtractor {
                 target: id,
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
     }
@@ -973,6 +981,7 @@ impl CExtractor {
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 
@@ -1039,6 +1048,7 @@ impl CExtractor {
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 
@@ -1105,6 +1115,7 @@ impl CExtractor {
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 
@@ -1175,6 +1186,7 @@ impl CExtractor {
                 target: id,
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
     }
@@ -1241,6 +1253,7 @@ impl CExtractor {
                 target: id,
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
     }
@@ -1332,6 +1345,7 @@ impl CExtractor {
                 target: id,
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
     }
@@ -1406,6 +1420,7 @@ impl CExtractor {
                 target: id,
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
     }

@@ -260,6 +260,7 @@ impl MsBasic2Extractor {
                 target: id,
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
     }
@@ -400,6 +401,7 @@ impl MsBasic2Extractor {
                             target: fn_id.clone(),
                             kind: EdgeKind::Contains,
                             line: Some(start_line),
+                            resolved_by: None,
                         });
                     }
 

@@ -159,11 +159,19 @@ Expected: Returns symbols like `extract_python`, `extract_ruby`, `RustExtractor`
 
 ---
 
-## tokensave_rename_preview
+## tokensave_rename
 
-> If I rename the `search` method, what would be affected? Search for it first, then preview the rename.
+> I want to rename the `search` method to `find_symbols`. Search for it first, then show me the rename plan without editing anything.
 
-Expected: Returns all edges (callers, containers, etc.) referencing that symbol.
+Expected: A dry run (`dry_run` defaults to true). Returns the definition and every incoming reference grouped by file, each with a 1-based line and column and a confidence class (`exact`, `heuristic`, `ambiguous`, `text_only`), counts per class, and a unified diff of the edits it would apply. Comments, strings and docs that mention the name are listed under `text_only` and are not in the diff.
+
+> Now apply it.
+
+Expected: With `dry_run: false`, the rename is refused if any site is `heuristic` or `ambiguous` (or an unlinked identifier mentions the name), listing those sites. With `allow_heuristic: true` the heuristic sites are edited too; ambiguous and text-only sites never are. Refuses a keyword, a non-identifier, or a name already used in the same scope. On success, reports the files changed.
+
+> Preview the rename with the old tool name, `tokensave_rename_preview`.
+
+Expected: Same plan as a dry run of `tokensave_rename`; the alias never edits, even with `dry_run: false`. It does not appear in `tools/list`.
 
 ---
 

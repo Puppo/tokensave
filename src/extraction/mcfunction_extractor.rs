@@ -76,6 +76,7 @@ impl McFunctionExtractor {
             target: fn_node_id.clone(),
             kind: EdgeKind::Contains,
             line: Some(0),
+            resolved_by: None,
         });
 
         for (line_no, line) in source.lines().enumerate() {

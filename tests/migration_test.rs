@@ -1459,3 +1459,141 @@ async fn test_migrate_v15_partial_schema_does_not_error() {
     assert!(!index_exists(&conn, "idx_nodes_parent_id").await);
     assert!(!index_exists(&conn, "idx_edges_source_kind").await);
 }
+
+/// `(type, notnull)` of `edges.resolved_by`, or `None` when it is absent.
+async fn resolved_by_column(conn: &Connection) -> Option<(String, i64)> {
+    let mut rows = conn
+        .query("PRAGMA table_info(edges)", ())
+        .await
+        .expect("table_info");
+    while let Some(row) = rows.next().await.expect("table_info row") {
+        let name: String = row.get(1).expect("name");
+        if name == "resolved_by" {
+            return Some((row.get(2).expect("type"), row.get(3).expect("notnull")));
+        }
+    }
+    None
+}
+
+/// Inserts two nodes, `a` and `b`, if missing.
+async fn insert_node_pair(conn: &Connection) {
+    for id in ["a", "b"] {
+        conn.execute(
+            &format!(
+                "INSERT OR IGNORE INTO nodes (id, kind, name, qualified_name, file_path, start_line, \
+                 end_line, start_column, end_column, updated_at) \
+                 VALUES ('{id}', 'function', '{id}', '{id}', 'x.rs', 0, 0, 0, 0, 0)"
+            ),
+            (),
+        )
+        .await
+        .expect("insert node");
+    }
+}
+
+/// Inserts an `a -> b` edge with the given `resolved_by` SQL literal.
+async fn insert_edge_with(conn: &Connection, resolved_by: &str) {
+    insert_node_pair(conn).await;
+    conn.execute(
+        &format!(
+            "INSERT INTO edges (source, target, kind, line, resolved_by) \
+             VALUES ('a', 'b', 'calls', 1, {resolved_by})"
+        ),
+        (),
+    )
+    .await
+    .expect("insert edge");
+}
+
+/// A fresh schema carries the v18 column: nullable INTEGER.
+#[tokio::test]
+async fn test_fresh_schema_has_integer_resolved_by() {
+    let (_dir, conn, _db) = create_raw_db().await;
+    create_schema(&conn).await.expect("create_schema");
+    assert_eq!(
+        resolved_by_column(&conn).await,
+        Some(("INTEGER".to_string(), 0))
+    );
+    insert_edge_with(&conn, "NULL").await;
+}
+
+/// V18 adds `edges.resolved_by` to a v17 database that lacks it, leaving the
+/// existing rows NULL.
+#[tokio::test]
+async fn test_migrate_v18_adds_resolved_by() {
+    let (_dir, conn, _db) = create_raw_db().await;
+    create_schema(&conn).await.expect("create_schema");
+    conn.execute_batch("ALTER TABLE edges DROP COLUMN resolved_by;")
+        .await
+        .expect("simulate a v17 edges table");
+    assert_eq!(resolved_by_column(&conn).await, None);
+    insert_node_pair(&conn).await;
+    conn.execute(
+        "INSERT INTO edges (source, target, kind, line) VALUES ('a', 'b', 'calls', 1)",
+        (),
+    )
+    .await
+    .expect("insert v17 edge");
+    set_user_version(&conn, 17).await;
+
+    assert!(migrate(&conn).await.expect("v18 migration"));
+    assert_eq!(get_user_version(&conn).await, latest_version());
+    assert_eq!(
+        resolved_by_column(&conn).await,
+        Some(("INTEGER".to_string(), 0))
+    );
+    let mut rows = conn
+        .query("SELECT resolved_by FROM edges", ())
+        .await
+        .expect("select");
+    let row = rows.next().await.expect("row").expect("one edge");
+    assert_eq!(row.get::<Option<i64>>(0).expect("value"), None);
+}
+
+/// V18 replaces the leftover `resolved_by TEXT NOT NULL DEFAULT 'direct'`
+/// column of very old databases, which would reject NULL and stringify codes.
+#[tokio::test]
+async fn test_migrate_v18_replaces_legacy_text_column() {
+    let (_dir, conn, _db) = create_raw_db().await;
+    create_schema(&conn).await.expect("create_schema");
+    conn.execute_batch(
+        "ALTER TABLE edges DROP COLUMN resolved_by;
+         ALTER TABLE edges ADD COLUMN resolved_by TEXT NOT NULL DEFAULT 'direct';",
+    )
+    .await
+    .expect("simulate the legacy column");
+    insert_edge_with(&conn, "'direct'").await;
+    set_user_version(&conn, 17).await;
+
+    assert!(migrate(&conn).await.expect("v18 migration"));
+    assert_eq!(get_user_version(&conn).await, latest_version());
+    assert_eq!(
+        resolved_by_column(&conn).await,
+        Some(("INTEGER".to_string(), 0))
+    );
+    // The legacy value is gone, NULL is accepted, and a code stays an integer.
+    conn.execute("DELETE FROM edges", ()).await.expect("clear");
+    insert_edge_with(&conn, "NULL").await;
+    conn.execute("UPDATE edges SET resolved_by = 3", ())
+        .await
+        .expect("update");
+    let mut rows = conn
+        .query("SELECT typeof(resolved_by) FROM edges", ())
+        .await
+        .expect("select");
+    let row = rows.next().await.expect("row").expect("one edge");
+    assert_eq!(row.get::<String>(0).expect("typeof"), "integer");
+}
+
+/// A database whose column is already the v18 shape is left alone.
+#[tokio::test]
+async fn test_migrate_v18_is_idempotent() {
+    let (_dir, conn, _db) = create_raw_db().await;
+    create_schema(&conn).await.expect("create_schema");
+    set_user_version(&conn, 17).await;
+    assert!(migrate(&conn).await.expect("v18 on an up-to-date column"));
+    assert_eq!(
+        resolved_by_column(&conn).await,
+        Some(("INTEGER".to_string(), 0))
+    );
+}

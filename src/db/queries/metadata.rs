@@ -116,7 +116,7 @@ impl Database {
                 .map(|(i, _)| format!("?{}", i + 1))
                 .collect();
             let sql = format!(
-                "SELECT source, target, kind, line FROM edges WHERE source IN ({})",
+                "SELECT source, target, kind, line, resolved_by FROM edges WHERE source IN ({})",
                 placeholders.join(", ")
             );
 

@@ -322,7 +322,9 @@ impl Database {
 
         // Edges (Contains has already been hoisted out into parent_id)
         for chunk in surviving_edges.chunks(500) {
-            sql.push_str("INSERT OR IGNORE INTO edges (source,target,kind,line) VALUES ");
+            sql.push_str(
+                "INSERT OR IGNORE INTO edges (source,target,kind,line,resolved_by) VALUES ",
+            );
             for (i, edge) in chunk.iter().enumerate() {
                 if i > 0 {
                     sql.push(',');
@@ -336,6 +338,11 @@ impl Database {
                 sql.push(',');
                 match edge.line {
                     Some(l) => push_int(&mut sql, i64::from(l)),
+                    None => sql.push_str("NULL"),
+                }
+                sql.push(',');
+                match edge.resolved_by {
+                    Some(r) => push_int(&mut sql, r.code()),
                     None => sql.push_str("NULL"),
                 }
                 sql.push(')');
@@ -877,6 +884,55 @@ impl Database {
             let encoded = get_string_lossy(&row, 0).unwrap_or_default();
             let ids: Vec<String> = serde_json::from_str(&encoded).unwrap_or_default();
             out.extend(ids);
+        }
+        Ok(out)
+    }
+
+    /// Recorded ambiguous calls that name `node_id` among their candidates.
+    ///
+    /// `candidate_node_ids` is a JSON array, so the `LIKE` is a cheap
+    /// prefilter on the quoted id and the decoded array is checked exactly.
+    pub async fn get_ambiguous_calls_naming(&self, node_id: &str) -> Result<Vec<AmbiguousCall>> {
+        let pattern = format!(
+            "%\"{}\"%",
+            node_id
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        );
+        let mut rows = self
+            .conn()
+            .query(
+                "SELECT from_node_id, reference_name, file_path, line, candidate_node_ids
+                 FROM ambiguous_calls
+                 WHERE candidate_node_ids LIKE ?1 ESCAPE '\\'
+                 ORDER BY file_path, line",
+                params![pattern],
+            )
+            .await
+            .map_err(|e| TokenSaveError::Database {
+                message: format!("failed to query ambiguous calls for a candidate: {e}"),
+                operation: "get_ambiguous_calls_naming".to_string(),
+            })?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(|e| TokenSaveError::Database {
+            message: format!("failed to read ambiguous call row: {e}"),
+            operation: "get_ambiguous_calls_naming".to_string(),
+        })? {
+            let encoded = get_string_lossy(&row, 4).unwrap_or_default();
+            let candidate_node_ids: Vec<String> =
+                serde_json::from_str(&encoded).unwrap_or_default();
+            if !candidate_node_ids.iter().any(|id| id == node_id) {
+                continue;
+            }
+            out.push(AmbiguousCall {
+                from_node_id: get_string_lossy(&row, 0).unwrap_or_default(),
+                reference_name: get_string_lossy(&row, 1).unwrap_or_default(),
+                file_path: get_string_lossy(&row, 2).unwrap_or_default(),
+                line: row.get::<i64>(3).unwrap_or(0) as u32,
+                column: 0,
+                candidate_node_ids,
+            });
         }
         Ok(out)
     }

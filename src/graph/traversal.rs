@@ -154,6 +154,7 @@ impl<'a> GraphTraverser<'a> {
                                     target: child.id.clone(),
                                     kind: EdgeKind::Contains,
                                     line: None,
+                                    resolved_by: None,
                                 });
                                 queue.push_back((child.id, depth + 1));
                             }

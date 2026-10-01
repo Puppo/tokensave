@@ -173,6 +173,7 @@ impl TomlExtractor {
             target: id.clone(),
             kind: EdgeKind::Contains,
             line: Some(start_line),
+            resolved_by: None,
         });
 
         // Pairs are direct children of the table node, parented to it
@@ -267,6 +268,7 @@ impl TomlExtractor {
             target: id,
             kind: EdgeKind::Contains,
             line: Some(start_line),
+            resolved_by: None,
         });
     }
 

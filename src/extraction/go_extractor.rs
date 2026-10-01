@@ -168,6 +168,7 @@ impl GoExtractor {
                 target: id,
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
     }
@@ -311,6 +312,7 @@ impl GoExtractor {
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 
@@ -380,6 +382,7 @@ impl GoExtractor {
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 
@@ -447,6 +450,7 @@ impl GoExtractor {
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 
@@ -552,6 +556,7 @@ impl GoExtractor {
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 
@@ -631,6 +636,7 @@ impl GoExtractor {
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 
@@ -699,6 +705,7 @@ impl GoExtractor {
             target: id,
             kind: EdgeKind::Contains,
             line: Some(start_line),
+            resolved_by: None,
         });
     }
 
@@ -759,6 +766,7 @@ impl GoExtractor {
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 
@@ -856,6 +864,7 @@ impl GoExtractor {
                 target: id,
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
     }
@@ -911,6 +920,7 @@ impl GoExtractor {
                 target: id,
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
     }
@@ -983,6 +993,7 @@ impl GoExtractor {
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 
@@ -1059,6 +1070,7 @@ impl GoExtractor {
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 
@@ -1128,6 +1140,7 @@ impl GoExtractor {
                                     target: struct_id,
                                     kind: EdgeKind::Receives,
                                     line: Some(line),
+                                    resolved_by: None,
                                 });
                             }
                         }
@@ -1218,6 +1231,7 @@ impl GoExtractor {
                                 target: id,
                                 kind: EdgeKind::Contains,
                                 line: Some(start_line),
+                                resolved_by: None,
                             });
                         }
                     }

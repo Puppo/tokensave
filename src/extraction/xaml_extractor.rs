@@ -91,6 +91,7 @@ impl XamlExtractor {
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(root.line),
+                resolved_by: None,
             });
             Some(id)
         });
@@ -144,6 +145,7 @@ impl XamlExtractor {
                         target: id,
                         kind: EdgeKind::Contains,
                         line: Some(tag.line),
+                        resolved_by: None,
                     });
                 } else if Self::is_event_attr(attr) && Self::is_identifier(value) {
                     unresolved_refs.push(UnresolvedRef {

@@ -431,6 +431,7 @@ pub fn build_doc_graph<S: std::hash::BuildHasher>(
                     target: target.clone(),
                     kind: EdgeKind::Documents,
                     line: None,
+                    resolved_by: None,
                 });
             }
         }

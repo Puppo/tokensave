@@ -76,18 +76,21 @@ async fn setup_call_chain() -> (TempDir, Database) {
             target: "n-process".to_string(),
             kind: EdgeKind::Calls,
             line: Some(5),
+            resolved_by: None,
         },
         Edge {
             source: "n-process".to_string(),
             target: "n-validate".to_string(),
             kind: EdgeKind::Calls,
             line: Some(10),
+            resolved_by: None,
         },
         Edge {
             source: "n-validate".to_string(),
             target: "n-check".to_string(),
             kind: EdgeKind::Calls,
             line: Some(15),
+            resolved_by: None,
         },
     ];
     db.insert_edges(&edges)
@@ -371,12 +374,14 @@ async fn test_bfs_visits_calls_before_references() {
             target: "n-ref".to_string(),
             kind: EdgeKind::Uses,
             line: Some(1),
+            resolved_by: None,
         },
         Edge {
             source: "n-root".to_string(),
             target: "n-call".to_string(),
             kind: EdgeKind::Calls,
             line: Some(2),
+            resolved_by: None,
         },
     ];
     db.insert_edges(&edges)
@@ -601,6 +606,7 @@ async fn test_find_dead_code_excludes_trait_impl_methods() {
         target: "n-trait-local".to_string(),
         kind: EdgeKind::Implements,
         line: Some(1),
+        resolved_by: None,
     }])
     .await
     .expect("insert edges failed");
@@ -716,18 +722,21 @@ async fn test_find_dead_code_excludes_test_annotated() {
             target: "n-test-fn".to_string(),
             kind: EdgeKind::Annotates,
             line: Some(1),
+            resolved_by: None,
         },
         Edge {
             source: "n-annot-tokio".to_string(),
             target: "n-tokio-fn".to_string(),
             kind: EdgeKind::Annotates,
             line: Some(1),
+            resolved_by: None,
         },
         Edge {
             source: "n-annot-wbg".to_string(),
             target: "n-wbg-fn".to_string(),
             kind: EdgeKind::Annotates,
             line: Some(1),
+            resolved_by: None,
         },
     ];
     db.insert_edges(&annot_edges)
@@ -866,12 +875,14 @@ async fn test_find_circular_dependencies() {
             target: "n-b".to_string(),
             kind: EdgeKind::Calls,
             line: Some(1),
+            resolved_by: None,
         },
         Edge {
             source: "n-b".to_string(),
             target: "n-a".to_string(),
             kind: EdgeKind::Calls,
             line: Some(1),
+            resolved_by: None,
         },
     ];
     db.insert_edges(&edges).await.expect("insert edges failed");
@@ -937,6 +948,7 @@ async fn test_type_hierarchy() {
         target: "n-trait".to_string(),
         kind: EdgeKind::Implements,
         line: None,
+        resolved_by: None,
     };
     db.insert_edge(&edge).await.expect("insert edge failed");
 
@@ -1023,12 +1035,14 @@ async fn test_node_metrics_depth() {
             target: "n-module".to_string(),
             kind: EdgeKind::Contains,
             line: None,
+            resolved_by: None,
         },
         Edge {
             source: "n-module".to_string(),
             target: "n-func".to_string(),
             kind: EdgeKind::Contains,
             line: None,
+            resolved_by: None,
         },
     ];
     db.insert_edges(&edges).await.expect("insert edges failed");
@@ -1514,6 +1528,7 @@ async fn dead_code_marker_resolve_is_single_pass() {
             target: format!("n-fn-{i}"),
             kind: EdgeKind::Calls,
             line: Some(1),
+            resolved_by: None,
         });
     }
 
@@ -1524,6 +1539,7 @@ async fn dead_code_marker_resolve_is_single_pass() {
             target: format!("n-fn-{i}"),
             kind: EdgeKind::Annotates,
             line: Some(1),
+            resolved_by: None,
         });
     }
 

@@ -407,6 +407,150 @@ pub struct Edge {
     pub target: String,
     pub kind: EdgeKind,
     pub line: Option<u32>,
+    /// Which resolver path produced this edge (#544). `None` for an edge an
+    /// extractor emitted directly from the syntax tree, and for rows written
+    /// before the column existed.
+    #[serde(default)]
+    pub resolved_by: Option<ResolvedBy>,
+}
+
+impl Edge {
+    /// Orders duplicate edges by how well their provenance is established:
+    /// 0 for an exact resolution, 1 for a heuristic one, 2 for none recorded.
+    ///
+    /// Several references on one line can resolve to the same target by
+    /// different paths (`c.bump()` and `Counter::bump` from one call), and
+    /// the unique edge index keeps only one row. Sorting by this rank before
+    /// deduplicating keeps the strongest provenance instead of an arbitrary
+    /// one (#544).
+    #[must_use]
+    pub fn provenance_rank(&self) -> u8 {
+        match self.resolved_by {
+            Some(r) if r.is_exact() => 0,
+            Some(_) => 1,
+            None => 2,
+        }
+    }
+}
+
+/// How the resolver bound a reference to its target (#544).
+///
+/// Persisted as a small integer in `edges.resolved_by` rather than as the
+/// string the resolver reports, because the edges table is the largest in
+/// the database: an integer of 1–127 costs one byte per row. The codes are a
+/// storage format. Never renumber one; add new variants at the end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[repr(u8)]
+pub enum ResolvedBy {
+    /// The only node in the project with the referenced name.
+    ExactMatch = 1,
+    /// The best of several same-named candidates, picked by scoring.
+    ExactMatchScored = 2,
+    /// A `::`-qualified path matched a qualified name.
+    QualifiedMatch = 3,
+    /// The trailing segment of `recv.method` or `Type::method`, as the only
+    /// candidate with that name.
+    SimpleNameMatch = 4,
+    /// The trailing segment, best of several candidates by scoring.
+    SimpleNameMatchScored = 5,
+    /// A Go `pkg.Name` selector, through the file's imports.
+    GoSelectorImport = 6,
+    /// A blocklisted common name, bound to the one same-file candidate.
+    SameFileBlocklist = 7,
+    /// A Ruby `self.method` call on the enclosing class or module.
+    RubySelfReceiver = 8,
+    /// A Ruby `Constant.method` call on that constant's singleton method.
+    RubyConstantReceiver = 9,
+    /// A `GDScript` call through a statically typed receiver.
+    GdscriptTypedReceiver = 10,
+    /// Copied from a call to a build-variant twin (`#[cfg]` sibling).
+    BuildVariant = 11,
+    /// The trailing segment of a `::` path that matched no qualified name,
+    /// as the only candidate with that name.
+    PathTailMatch = 12,
+    /// The trailing segment of a `::` path, best of several by scoring.
+    PathTailMatchScored = 13,
+}
+
+impl ResolvedBy {
+    /// Every variant, in code order.
+    pub const ALL: [ResolvedBy; 13] = [
+        ResolvedBy::ExactMatch,
+        ResolvedBy::ExactMatchScored,
+        ResolvedBy::QualifiedMatch,
+        ResolvedBy::SimpleNameMatch,
+        ResolvedBy::SimpleNameMatchScored,
+        ResolvedBy::GoSelectorImport,
+        ResolvedBy::SameFileBlocklist,
+        ResolvedBy::RubySelfReceiver,
+        ResolvedBy::RubyConstantReceiver,
+        ResolvedBy::GdscriptTypedReceiver,
+        ResolvedBy::BuildVariant,
+        ResolvedBy::PathTailMatch,
+        ResolvedBy::PathTailMatchScored,
+    ];
+
+    /// The resolver's name for this path, as `ResolvedRef::resolved_by` holds it.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ResolvedBy::ExactMatch => "exact-match",
+            ResolvedBy::ExactMatchScored => "exact-match-scored",
+            ResolvedBy::QualifiedMatch => "qualified-match",
+            ResolvedBy::SimpleNameMatch => "simple-name-match",
+            ResolvedBy::SimpleNameMatchScored => "simple-name-match-scored",
+            ResolvedBy::GoSelectorImport => "go-selector-import",
+            ResolvedBy::SameFileBlocklist => "same-file-blocklist",
+            ResolvedBy::RubySelfReceiver => "ruby-self-receiver",
+            ResolvedBy::RubyConstantReceiver => "ruby-constant-receiver",
+            ResolvedBy::GdscriptTypedReceiver => "gdscript-typed-receiver",
+            ResolvedBy::BuildVariant => "build-variant",
+            ResolvedBy::PathTailMatch => "path-tail-match",
+            ResolvedBy::PathTailMatchScored => "path-tail-match-scored",
+        }
+    }
+
+    /// Parses the resolver's string name. `None` for an unknown name.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|r| r.as_str() == name)
+    }
+
+    /// The integer stored in `edges.resolved_by`.
+    #[must_use]
+    pub fn code(self) -> i64 {
+        i64::from(self as u8)
+    }
+
+    /// Decodes a stored code. `None` for a code this build does not know.
+    #[must_use]
+    pub fn from_code(code: i64) -> Option<Self> {
+        Self::ALL.into_iter().find(|r| r.code() == code)
+    }
+
+    /// True when the resolver had a single candidate it could justify: a
+    /// qualified path, a typed or constant receiver, a Go import, or a name
+    /// (bare, or the tail of a `::` path) that no other node in the project
+    /// carries.
+    ///
+    /// False for the fallbacks where a same-named symbol elsewhere could be
+    /// the real target: the tail of a dotted receiver call (`recv.method`,
+    /// receiver type unknown), a winner picked by scoring among several
+    /// candidates, a blocklisted common name, and a build-variant copy.
+    #[must_use]
+    pub fn is_exact(self) -> bool {
+        matches!(
+            self,
+            ResolvedBy::ExactMatch
+                | ResolvedBy::QualifiedMatch
+                | ResolvedBy::PathTailMatch
+                | ResolvedBy::GoSelectorImport
+                | ResolvedBy::RubySelfReceiver
+                | ResolvedBy::RubyConstantReceiver
+                | ResolvedBy::GdscriptTypedReceiver
+        )
+    }
 }
 
 /// What kind of file a [`FileRecord`] describes.

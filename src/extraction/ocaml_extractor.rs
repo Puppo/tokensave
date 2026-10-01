@@ -187,6 +187,7 @@ impl OcamlExtractor {
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 
@@ -250,6 +251,7 @@ impl OcamlExtractor {
                                 target: id,
                                 kind: EdgeKind::Contains,
                                 line: Some(start_line),
+                                resolved_by: None,
                             });
                         }
                     }
@@ -317,6 +319,7 @@ impl OcamlExtractor {
                                 target: id.clone(),
                                 kind: EdgeKind::Contains,
                                 line: Some(start_line),
+                                resolved_by: None,
                             });
                         }
 
@@ -387,6 +390,7 @@ impl OcamlExtractor {
                                 target: id,
                                 kind: EdgeKind::Contains,
                                 line: Some(start_line),
+                                resolved_by: None,
                             });
                         }
                     }
@@ -446,6 +450,7 @@ impl OcamlExtractor {
                 target: id,
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
     }

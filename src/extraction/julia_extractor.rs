@@ -295,6 +295,7 @@ impl JuliaExtractor {
                 target: id,
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
     }
@@ -355,6 +356,7 @@ impl JuliaExtractor {
                 target: id,
                 kind: EdgeKind::Contains,
                 line: Some(node.start_position().row as u32),
+                resolved_by: None,
             });
         }
     }

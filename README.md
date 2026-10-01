@@ -513,7 +513,7 @@ partial answer is never presented as a complete one.
 | `tokensave_callees` | Find what a function calls |
 | `tokensave_impact` | See what's affected by changing a symbol |
 | `tokensave_affected` | Find test files affected by source changes |
-| `tokensave_rename_preview` | All references to a symbol (preview rename impact) |
+| `tokensave_rename` | Graph-based rename: every site with a confidence class (`exact`, `heuristic`, `ambiguous`, `text_only`), a diff preview, and an all-or-nothing apply. Not binding-aware |
 | `tokensave_hotspots` | Most connected symbols (highest call count) |
 
 ### Code Quality

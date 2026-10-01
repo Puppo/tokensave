@@ -137,6 +137,7 @@ async fn test_insert_and_get_edge() {
         target: "node-b".to_string(),
         kind: EdgeKind::Calls,
         line: Some(5),
+        resolved_by: None,
     };
     db.insert_edge(&edge).await.expect("failed to insert edge");
 
@@ -282,6 +283,7 @@ async fn test_delete_nodes_by_file() {
         target: "del-2".to_string(),
         kind: EdgeKind::Calls,
         line: None,
+        resolved_by: None,
     };
     db.insert_edge(&edge).await.expect("failed to insert edge");
 

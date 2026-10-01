@@ -15,7 +15,7 @@ use crate::errors::{Result, TokenSaveError};
 
 /// The highest migration version defined in this file. Bump this and add a
 /// new entry to `run_migration` whenever the schema changes.
-const LATEST_VERSION: u32 = 17;
+const LATEST_VERSION: u32 = 18;
 
 /// Schema for the ambiguity record added in v17 (#412). Used by both
 /// `migrate_v17` and the fresh-schema path, which never replays migrations.
@@ -175,6 +175,7 @@ pub async fn create_schema(conn: &Connection) -> Result<()> {
             target TEXT NOT NULL,
             kind TEXT NOT NULL,
             line INTEGER,
+            resolved_by INTEGER,
             FOREIGN KEY (source) REFERENCES nodes(id) ON DELETE CASCADE,
             FOREIGN KEY (target) REFERENCES nodes(id) ON DELETE CASCADE
         );
@@ -460,6 +461,7 @@ async fn run_migration(conn: &Connection, version: u32) -> Result<()> {
         15 => migrate_v15(conn).await,
         16 => migrate_v16(conn).await,
         17 => migrate_v17(conn).await,
+        18 => migrate_v18(conn).await,
         _ => Err(TokenSaveError::Database {
             message: format!("unknown migration version: {version}"),
             operation: "run_migration".to_string(),
@@ -1614,4 +1616,75 @@ async fn table_columns(conn: &Connection, table: &str) -> Result<Vec<String>> {
         cols.push(name);
     }
     Ok(cols)
+}
+
+/// v18: persists resolution provenance on edges (#544).
+///
+/// The resolver has always decided *how* it bound each reference
+/// (`exact-match`, `qualified-match`, `simple-name-match`, …) and then thrown
+/// the answer away. `tokensave_rename` needs it to tell a site it can edit
+/// from one it can only list, and it turns "how much of the graph rests on
+/// the bare-name fallback" into a `GROUP BY`.
+///
+/// The column is a nullable small integer (see [`crate::types::ResolvedBy`]),
+/// not text: the edges table is the largest in the database, and a code of
+/// 1–127 costs one byte per row where `'simple-name-match'` would cost 17.
+///
+/// Databases created before the migration runner existed can carry a
+/// leftover `resolved_by TEXT NOT NULL DEFAULT 'direct'` column that nothing
+/// maintains. It is dropped and re-added rather than reused: its `NOT NULL`
+/// rejects the NULL written for extractor edges, and its TEXT affinity would
+/// turn every stored code into a string.
+///
+/// Existing rows read NULL until they are re-indexed; `TokenSave::open`
+/// forces a full index after any migration.
+async fn migrate_v18(conn: &Connection) -> Result<()> {
+    if !table_exists(conn, "edges").await? {
+        return Ok(());
+    }
+    let mut legacy = false;
+    let mut current = false;
+    let mut rows = conn
+        .query("PRAGMA table_info(edges)", ())
+        .await
+        .map_err(|e| TokenSaveError::Database {
+            message: format!("v18: failed to read edges table_info: {e}"),
+            operation: "migrate_v18".to_string(),
+        })?;
+    while let Some(row) = rows.next().await.map_err(|e| TokenSaveError::Database {
+        message: format!("v18: failed to read table_info row: {e}"),
+        operation: "migrate_v18".to_string(),
+    })? {
+        // PRAGMA table_info columns: cid(0), name(1), type(2), notnull(3), ...
+        let name: String = row.get(1).unwrap_or_default();
+        if name != "resolved_by" {
+            continue;
+        }
+        let ty: String = row.get(2).unwrap_or_default();
+        let not_null: i64 = row.get(3).unwrap_or(0);
+        if ty.eq_ignore_ascii_case("INTEGER") && not_null == 0 {
+            current = true;
+        } else {
+            legacy = true;
+        }
+    }
+    drop(rows);
+    if current {
+        return Ok(());
+    }
+    if legacy {
+        conn.execute_batch("ALTER TABLE edges DROP COLUMN resolved_by;")
+            .await
+            .map_err(|e| TokenSaveError::Database {
+                message: format!("v18: failed to drop legacy edges.resolved_by: {e}"),
+                operation: "migrate_v18".to_string(),
+            })?;
+    }
+    conn.execute_batch("ALTER TABLE edges ADD COLUMN resolved_by INTEGER;")
+        .await
+        .map_err(|e| TokenSaveError::Database {
+            message: format!("v18: failed to add edges.resolved_by: {e}"),
+            operation: "migrate_v18".to_string(),
+        })?;
+    Ok(())
 }

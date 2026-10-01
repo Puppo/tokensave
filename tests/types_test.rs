@@ -200,6 +200,7 @@ fn edge_serde_roundtrip() {
         target: "function:bbbb".to_string(),
         kind: EdgeKind::Calls,
         line: Some(15),
+        resolved_by: None,
     };
 
     let json = serde_json::to_string(&edge).expect("failed to serialize Edge");
@@ -345,12 +346,14 @@ fn extraction_result_sanitize_no_empty_names() {
         target: "function:aaa".to_string(),
         kind: EdgeKind::Calls,
         line: None,
+        resolved_by: None,
     };
     let edge_involving_bad = Edge {
         source: "function:bbb".to_string(),
         target: "function:aaa".to_string(),
         kind: EdgeKind::Calls,
         line: None,
+        resolved_by: None,
     };
     let unresolved_bad = UnresolvedRef {
         from_node_id: "function:bbb".to_string(),

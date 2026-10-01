@@ -463,6 +463,7 @@ impl SystemVerilogExtractor {
                 target: id.to_string(),
                 kind: EdgeKind::Contains,
                 line: Some(line),
+                resolved_by: None,
             });
         }
     }

@@ -901,7 +901,20 @@ only files you asked about and the index could not answer for.
 | `tokensave_impact` | Trace the full blast radius of changing a symbol — everything that could be affected. |
 | `tokensave_affected` | Find test files affected by source file changes. |
 | `tokensave_similar` | Find symbols with similar names (useful for naming patterns or related code). |
-| `tokensave_rename_preview` | Preview all references to a symbol before renaming it. |
+| `tokensave_rename` | Rename a symbol at its definition and at every reference the graph records. Dry run by default: lists the sites by file with a confidence class and shows a unified diff. Graph-based, not binding-aware — see [Renaming a symbol](#renaming-a-symbol). The old `tokensave_rename_preview` name still works as a dry-run alias. |
+
+#### Renaming a symbol
+
+`tokensave_rename` renames a symbol at its definition and at every reference the code graph records. It is graph-based, **not binding-aware**: references come from tokensave's name-based resolver, not from each language's scope rules, so a shadowing local, a dynamic call or a `**kwargs` splat can be missed or attributed to the wrong symbol. Each site carries a confidence class, taken from how the resolver bound it (`resolved_by`, stored on every edge since schema v18):
+
+| Class | Meaning | Edited? |
+|-------|---------|---------|
+| `exact` | Bound by a qualified path, a typed receiver, an import, or a name no other symbol carries, and located to one token | Yes |
+| `heuristic` | Bound by a name-based fallback (the tail of `recv.method`, scoring among same-named candidates, a blocklisted common name, a build variant), an override paired by name, or a token that could not be told apart from another on the same line | Only with `allow_heuristic: true` |
+| `ambiguous` | A call the resolver could not decide between this symbol and others | Never |
+| `text_only` | A whole-word mention the graph does not link: a comment, string, doc, or an unlinked identifier in code | Never |
+
+A dry run (the default) returns the plan and a unified diff. Applying refuses while any site is `heuristic` or `ambiguous`, or an unlinked identifier mentions the name, unless `allow_heuristic` is set. The apply is all-or-nothing: every edited file must still parse with tree-sitter without new error nodes, keywords and non-identifiers are refused, and so is a name already used in the same scope. Edited files are reindexed.
 
 ### Code quality analysis
 

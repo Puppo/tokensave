@@ -479,13 +479,23 @@ impl TokenSave {
 
         // 6. Sort by PK order + dedup edges
         all_nodes.sort_unstable_by(|a, b| a.id.cmp(&b.id));
+        // Provenance last, so the duplicate `dedup_by` keeps is the one with
+        // the strongest `resolved_by` (#544).
         all_edges.sort_unstable_by(|a, b| {
-            (&a.source, &a.target, a.kind.as_str(), &a.line).cmp(&(
-                &b.source,
-                &b.target,
-                b.kind.as_str(),
-                &b.line,
-            ))
+            (
+                &a.source,
+                &a.target,
+                a.kind.as_str(),
+                &a.line,
+                a.provenance_rank(),
+            )
+                .cmp(&(
+                    &b.source,
+                    &b.target,
+                    b.kind.as_str(),
+                    &b.line,
+                    b.provenance_rank(),
+                ))
         });
         all_edges.dedup_by(|a, b| {
             a.source == b.source && a.target == b.target && a.kind == b.kind && a.line == b.line

@@ -242,6 +242,7 @@ impl JavaExtractor {
                 target: id,
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
     }
@@ -307,6 +308,7 @@ impl JavaExtractor {
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 
@@ -381,6 +383,7 @@ impl JavaExtractor {
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 
@@ -453,6 +456,7 @@ impl JavaExtractor {
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 
@@ -524,6 +528,7 @@ impl JavaExtractor {
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 
@@ -600,6 +605,7 @@ impl JavaExtractor {
                 target: id,
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
     }
@@ -656,6 +662,7 @@ impl JavaExtractor {
                 target: id,
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
     }
@@ -729,6 +736,7 @@ impl JavaExtractor {
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 
@@ -798,6 +806,7 @@ impl JavaExtractor {
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 
@@ -880,6 +889,7 @@ impl JavaExtractor {
                             target: id,
                             kind: EdgeKind::Contains,
                             line: Some(start_line),
+                            resolved_by: None,
                         });
                     }
                 }
@@ -939,6 +949,7 @@ impl JavaExtractor {
                 target: id,
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
     }
@@ -1245,6 +1256,7 @@ impl JavaExtractor {
                         target: id,
                         kind: EdgeKind::Contains,
                         line: Some(start_line),
+                        resolved_by: None,
                     });
                 }
                 if !cursor.goto_next_sibling() {
@@ -1347,6 +1359,7 @@ impl JavaExtractor {
                         target: target_id.to_string(),
                         kind: EdgeKind::Annotates,
                         line: Some(start_line),
+                        resolved_by: None,
                     });
                 }
                 if !cursor.goto_next_sibling() {

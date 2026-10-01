@@ -245,6 +245,7 @@ impl GwBasicExtractor {
                     target: id,
                     kind: EdgeKind::Contains,
                     line: Some(start_line),
+                    resolved_by: None,
                 });
             }
         }
@@ -338,6 +339,7 @@ impl GwBasicExtractor {
                 target: id,
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
     }
@@ -472,6 +474,7 @@ impl GwBasicExtractor {
                             target: fn_id.clone(),
                             kind: EdgeKind::Contains,
                             line: Some(start_line),
+                            resolved_by: None,
                         });
                     }
 

@@ -137,3 +137,35 @@ async fn ruby_reopenings_follow_canonical_declarations_after_incremental_edits()
     let (_, deleted_fresh_edges) = declarations_and_reopenings(&deleted_fresh).await;
     assert_eq!(edges, deleted_fresh_edges);
 }
+
+#[tokio::test]
+async fn ruby_reopenings_link_rake_declarations() {
+    let root = tempdir().unwrap();
+    std::fs::write(
+        root.path().join("a.rb"),
+        "class Deploy\n  def run; end\nend\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.path().join("lib/tasks")).unwrap();
+    std::fs::write(
+        root.path().join("lib/tasks/deploy.rake"),
+        "class Deploy\n  def task_helper; end\nend\n",
+    )
+    .unwrap();
+    let graph = TokenSave::init(root.path()).await.unwrap();
+    graph.sync().await.unwrap();
+
+    let (nodes, edges) = declarations_and_reopenings(&graph).await;
+    let class_in = |file: &str| {
+        nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::Class && n.file_path == file)
+            .unwrap()
+    };
+    let rb = class_in("a.rb");
+    let rake = class_in("lib/tasks/deploy.rake");
+    assert_eq!(edges.len(), 1);
+    assert!(edges
+        .iter()
+        .any(|e| e.source == rake.id && e.target == rb.id));
+}

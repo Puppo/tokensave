@@ -3368,7 +3368,7 @@ impl RubyExtractor {
 
 impl crate::extraction::LanguageExtractor for RubyExtractor {
     fn extensions(&self) -> &[&str] {
-        &["rb"]
+        &["rb", "rake"]
     }
 
     fn language_name(&self) -> &'static str {

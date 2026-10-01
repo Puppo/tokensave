@@ -48,6 +48,20 @@ const HOOK_MARKER_CHECKOUT: &str = "# tokensave: auto-init";
 /// tokensave needs to do.
 const HOOK_MARKER_MERGE: &str = "# tokensave: auto-sync (post-merge)";
 
+/// Marker comment closing tokensave's section in the post-commit hook (#624).
+///
+/// The section used to be the marker plus one command line with nothing after
+/// it, so it could be appended but never found again with confidence, and a
+/// moved binary left the line pointing at a path that no longer existed. The
+/// end marker makes it a fence like post-checkout's, so it is rewritten in
+/// place. The unfenced shape is still recognised by
+/// [`replace_legacy_sync_line`] and migrated.
+const HOOK_MARKER_END: &str = "# tokensave: end auto-sync";
+
+/// Marker comment closing tokensave's section in the post-merge hook (#624).
+/// See [`HOOK_MARKER_END`].
+const HOOK_MARKER_MERGE_END: &str = "# tokensave: end auto-sync (post-merge)";
+
 /// Marker comment closing tokensave's section in the post-checkout hook.
 ///
 /// Written since #391 so that a migration can replace the section body in
@@ -198,6 +212,42 @@ fn replace_legacy_checkout_block(
     Some(out)
 }
 
+/// Replaces an unfenced post-commit/post-merge section with `block` (#624).
+///
+/// Every release before the fence wrote the marker line and one command line,
+/// `<bin> sync >/dev/null 2>&1 &`, with nothing closing it. The extent is not
+/// a guess: the marker must be a whole line, the next line must be that
+/// command ([`is_legacy_sync_command`]), and a section already followed by the
+/// end marker is fenced and belongs to [`replace_fenced_block`]. Everything
+/// else is preserved byte-for-byte.
+fn replace_legacy_sync_line(
+    contents: &str,
+    begin_marker: &str,
+    end_marker: &str,
+    block: &str,
+) -> Option<String> {
+    let lines: Vec<&str> = contents.split_inclusive('\n').collect();
+    let start = lines.iter().position(|l| l.trim() == begin_marker)?;
+    if !is_legacy_sync_command(lines.get(start + 1)?) {
+        return None;
+    }
+    if lines
+        .get(start + 2)
+        .is_some_and(|l| l.trim_start().starts_with(end_marker))
+    {
+        return None;
+    }
+    let mut out = String::with_capacity(contents.len() + block.len());
+    for line in &lines[..start] {
+        out.push_str(line);
+    }
+    out.push_str(block);
+    for line in &lines[start + 2..] {
+        out.push_str(line);
+    }
+    Some(out)
+}
+
 /// Writes `contents` to `path` atomically, preserving the existing mode.
 ///
 /// A hook is executed by git, so a partially written file is a broken hook
@@ -227,6 +277,68 @@ fn write_file_atomically(path: &Path, contents: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+/// `contents` with tokensave's section replaced by `block`, or `None` when no
+/// section of a recognised shape is present.
+fn rewrite_section(
+    contents: &str,
+    begin_prefix: &str,
+    end_marker: &str,
+    block: &str,
+) -> Option<String> {
+    // Legacy first (#580): in a file that holds both an unfenced legacy block
+    // and an appended fenced one, the fenced search would pair the legacy
+    // begin marker with the later end marker and replace everything between.
+    replace_legacy_checkout_block(contents, begin_prefix, end_marker, block)
+        .or_else(|| replace_legacy_sync_line(contents, begin_prefix, end_marker, block))
+        .or_else(|| replace_fenced_block(contents, begin_prefix, end_marker, block))
+}
+
+/// Rewrites tokensave's section of a hook file in place, never appending.
+///
+/// The refresh path (#624): a file with no section of a recognised shape is
+/// left untouched and reported [`HookWrite::UpToDate`], since adding a second
+/// block beside one tokensave cannot delimit would run both.
+fn migrate_block(hook_path: &Path, begin_prefix: &str, end_marker: &str, block: &str) -> HookWrite {
+    let Ok(existing) = std::fs::read_to_string(hook_path) else {
+        return HookWrite::UpToDate;
+    };
+    match rewrite_section(&existing, begin_prefix, end_marker, block) {
+        Some(updated) if updated != existing => match write_file_atomically(hook_path, &updated) {
+            Ok(()) => HookWrite::Migrated,
+            Err(e) => {
+                eprintln!(
+                    "  \x1b[31m✘\x1b[0m Failed to update {}: {e}",
+                    hook_path.display()
+                );
+                HookWrite::Failed
+            }
+        },
+        _ => HookWrite::UpToDate,
+    }
+}
+
+/// Installs a sync section (post-commit, post-merge) or rewrites the one
+/// already there (#624).
+///
+/// Before the fence these hooks were skipped whenever tokensave's marker was
+/// present, so the line was never updated. A present section is now rewritten
+/// in place; one tokensave cannot delimit is still left alone rather than
+/// gaining a duplicate.
+fn ensure_sync_section(
+    hook_path: &Path,
+    begin_prefix: &str,
+    end_marker: &str,
+    block: &str,
+) -> HookWrite {
+    if std::fs::read_to_string(hook_path).is_ok_and(|c| has_section(&c, begin_prefix)) {
+        migrate_block(hook_path, begin_prefix, end_marker, block)
+    } else if write_global_hook(hook_path, block) {
+        HookWrite::Installed
+    } else {
+        HookWrite::Failed
+    }
+}
+
 /// Installs or migrates tokensave's fenced block in a hook file.
 ///
 /// This is the (A) branch of #342 Q1: an ownership-aware in-place rewrite.
@@ -248,12 +360,7 @@ fn install_or_migrate_block(
         };
     };
 
-    // Legacy first (#580): in a file that holds both an unfenced legacy block
-    // and an appended fenced one, the fenced search would pair the legacy
-    // begin marker with the later end marker and replace everything between.
-    let updated = replace_legacy_checkout_block(&existing, begin_prefix, end_marker, block)
-        .or_else(|| replace_fenced_block(&existing, begin_prefix, end_marker, block));
-    match updated {
+    match rewrite_section(&existing, begin_prefix, end_marker, block) {
         Some(updated) if updated == existing => HookWrite::UpToDate,
         Some(updated) => match write_file_atomically(hook_path, &updated) {
             Ok(()) => HookWrite::Migrated,
@@ -357,7 +464,10 @@ fn migrate_global_chain_hooks(hooks_dir: &Path) -> ChainMigration {
         let Some(migrated) = migrate_chain_repo_hook(&contents, name) else {
             continue;
         };
-        if std::fs::write(&path, migrated).is_err() {
+        // Atomic, not an in-place truncate: after an upgrade the silent
+        // resync can run from a `tokensave sync` this very hook launched,
+        // and `sh` reads a script as it executes it (#624).
+        if write_file_atomically(&path, &migrated).is_err() {
             result.failed.push(name);
         } else {
             result.migrated.push(name);
@@ -455,21 +565,101 @@ fn should_chain_repo_hooks(
 }
 
 /// The hook snippet appended to (or written as) the post-commit script.
+///
+/// Fenced by [`HOOK_MARKER`] and [`HOOK_MARKER_END`] since #624, so a changed
+/// binary path is rewritten in place.
 fn post_commit_snippet(tokensave_bin: &str) -> String {
     let bin = tokensave_bin.replace('\\', "/");
     format!(
         "{HOOK_MARKER}\n\
-         {bin} sync >/dev/null 2>&1 &\n"
+         {bin} sync >/dev/null 2>&1 &\n\
+         {HOOK_MARKER_END}\n"
     )
 }
 
 /// The hook snippet appended to (or written as) the post-merge script.
+///
+/// Fenced like [`post_commit_snippet`].
 fn post_merge_snippet(tokensave_bin: &str) -> String {
     let bin = tokensave_bin.replace('\\', "/");
     format!(
         "{HOOK_MARKER_MERGE}\n\
-         {bin} sync >/dev/null 2>&1 &\n"
+         {bin} sync >/dev/null 2>&1 &\n\
+         {HOOK_MARKER_MERGE_END}\n"
     )
+}
+
+/// Is `line` the command an unfenced post-commit/post-merge section carried?
+///
+/// Every release before #624 wrote `<bin> sync >/dev/null 2>&1 &`; the bare
+/// `sync` and `sync &` forms are accepted too so a hand-trimmed copy of the
+/// line is still recognised. It is only consulted for the line directly after
+/// tokensave's own marker.
+fn is_legacy_sync_command(line: &str) -> bool {
+    let t = line.trim();
+    !t.is_empty()
+        && !t.starts_with('#')
+        && (t.ends_with(" sync >/dev/null 2>&1 &")
+            || t.ends_with(" sync &")
+            || t.ends_with(" sync"))
+}
+
+/// The hook files tokensave writes a section into, with each section's
+/// opening marker prefix, closing marker, and current body.
+fn owned_hook_sections(
+    tokensave_bin: &str,
+) -> [(&'static str, &'static str, &'static str, String); 3] {
+    [
+        (
+            "post-checkout",
+            HOOK_MARKER_CHECKOUT,
+            HOOK_MARKER_CHECKOUT_END,
+            post_checkout_snippet(tokensave_bin),
+        ),
+        (
+            "post-commit",
+            HOOK_MARKER,
+            HOOK_MARKER_END,
+            post_commit_snippet(tokensave_bin),
+        ),
+        (
+            "post-merge",
+            HOOK_MARKER_MERGE,
+            HOOK_MARKER_MERGE_END,
+            post_merge_snippet(tokensave_bin),
+        ),
+    ]
+}
+
+/// Does `contents` carry a section opened by `begin_prefix`?
+fn has_section(contents: &str, begin_prefix: &str) -> bool {
+    contents
+        .lines()
+        .any(|l| l.trim_start().starts_with(begin_prefix))
+}
+
+/// Rewrites each tokensave section already present in `hooks_dir` to the
+/// current shape, and installs nothing (#624).
+///
+/// Returns the hook names rewritten and the hook names whose rewrite failed.
+fn migrate_present_sections(
+    hooks_dir: &Path,
+    tokensave_bin: &str,
+) -> (Vec<&'static str>, Vec<&'static str>) {
+    let mut migrated = Vec::new();
+    let mut failed = Vec::new();
+    for (name, begin, end, block) in owned_hook_sections(tokensave_bin) {
+        let path = hooks_dir.join(name);
+        if !std::fs::read_to_string(&path).is_ok_and(|c| has_section(&c, begin)) {
+            continue;
+        }
+        match migrate_block(&path, begin, end, &block) {
+            HookWrite::Migrated => migrated.push(name),
+            HookWrite::Failed => failed.push(name),
+            HookWrite::Installed | HookWrite::UpToDate => {}
+        }
+    }
+    (migrated, failed)
 }
 
 /// What a `post-checkout` event should trigger.
@@ -734,10 +924,7 @@ pub fn offer_git_post_commit_hook(tokensave_bin: &str, mode: GitHookMode) -> Res
     // installed alongside it under the same opt-in, with its own marker, so a
     // pre-existing post-commit install still gains post-checkout on the next run.
     let install_post_commit = match decide_hook_action(mode, existing_contents.as_deref()) {
-        HookAction::AlreadyInstalled => {
-            eprintln!("  Global git post-commit hook already contains tokensave, skipping");
-            false
-        }
+        HookAction::AlreadyInstalled => false,
         HookAction::Skip => {
             // Mode `No` (or default-mode non-TTY). Stay quiet — script
             // callers asked for no output here.
@@ -787,15 +974,28 @@ pub fn offer_git_post_commit_hook(tokensave_bin: &str, mode: GitHookMode) -> Res
     // Hooks the user asked for whose write failed. Collected rather than
     // returned early: this installs three hooks, and bailing on the first
     // would skip the other two the user also asked for.
-    if install_post_commit {
-        if write_global_hook(&hook_path, &post_commit_snippet(tokensave_bin)) {
-            eprintln!(
-                "\x1b[32m✔\x1b[0m Installed global git post-commit hook at {}",
-                hook_path.display()
-            );
-        } else {
-            failed.push("post-commit");
+    //
+    // An existing section is rewritten in place rather than skipped (#624), so
+    // a moved binary or an unfenced pre-#624 line is brought up to date.
+    let commit_snippet = post_commit_snippet(tokensave_bin);
+    let commit_write = if install_post_commit {
+        ensure_sync_section(&hook_path, HOOK_MARKER, HOOK_MARKER_END, &commit_snippet)
+    } else {
+        migrate_block(&hook_path, HOOK_MARKER, HOOK_MARKER_END, &commit_snippet)
+    };
+    match commit_write {
+        HookWrite::Installed => eprintln!(
+            "\x1b[32m✔\x1b[0m Installed global git post-commit hook at {}",
+            hook_path.display()
+        ),
+        HookWrite::Migrated => eprintln!(
+            "\x1b[32m✔\x1b[0m Updated global git post-commit hook at {}",
+            hook_path.display()
+        ),
+        HookWrite::UpToDate => {
+            eprintln!("  Global git post-commit hook already contains tokensave, skipping");
         }
+        HookWrite::Failed => failed.push("post-commit"),
     }
 
     // Install the post-checkout hook so a fresh clone or worktree
@@ -847,16 +1047,30 @@ pub fn offer_git_post_commit_hook(tokensave_bin: &str, mode: GitHookMode) -> Res
     ) {
         write_global_hook(&merge_path, &chain_repo_hook_snippet("post-merge"));
     }
-    let merge_present = merge_contents.is_some_and(|c| c.contains(HOOK_MARKER_MERGE));
-    if !merge_present {
-        if write_global_hook(&merge_path, &post_merge_snippet(tokensave_bin)) {
-            eprintln!(
-                "\x1b[32m✔\x1b[0m Installed global git post-merge hook at {}",
-                merge_path.display()
-            );
-        } else {
-            failed.push("post-merge");
-        }
+    let merge_snippet = post_merge_snippet(tokensave_bin);
+    let merge_write = if merge_contents.is_some_and(|c| c.contains(HOOK_MARKER_MERGE)) {
+        migrate_block(
+            &merge_path,
+            HOOK_MARKER_MERGE,
+            HOOK_MARKER_MERGE_END,
+            &merge_snippet,
+        )
+    } else if write_global_hook(&merge_path, &merge_snippet) {
+        HookWrite::Installed
+    } else {
+        HookWrite::Failed
+    };
+    match merge_write {
+        HookWrite::Installed => eprintln!(
+            "\x1b[32m✔\x1b[0m Installed global git post-merge hook at {}",
+            merge_path.display()
+        ),
+        HookWrite::Migrated => eprintln!(
+            "\x1b[32m✔\x1b[0m Updated global git post-merge hook at {}",
+            merge_path.display()
+        ),
+        HookWrite::UpToDate => {}
+        HookWrite::Failed => failed.push("post-merge"),
     }
 
     // Issue #164 follow-up: claiming a global core.hooksPath disables *every*
@@ -981,24 +1195,19 @@ pub fn global_git_hooks_installed() -> bool {
 /// hook that is *absent* still asks, because that is a file the user has not
 /// agreed to yet.
 ///
+/// Since #624 this covers post-commit and post-merge as well as post-checkout,
+/// so a moved binary is followed in every hook.
+///
 /// Returns the hook names that were rewritten, for the caller to report.
 pub fn migrate_local_hook_blocks(repo: &Path, tokensave_bin: &str) -> Vec<String> {
     let Some(hooks_dir) = repo_hooks_dir(repo) else {
         return Vec::new();
     };
-    let path = hooks_dir.join("post-checkout");
-    if !std::fs::read_to_string(&path).is_ok_and(|c| c.contains(HOOK_MARKER_CHECKOUT)) {
-        return Vec::new();
-    }
-    match install_or_migrate_block(
-        &path,
-        HOOK_MARKER_CHECKOUT,
-        HOOK_MARKER_CHECKOUT_END,
-        &post_checkout_snippet(tokensave_bin),
-    ) {
-        HookWrite::Migrated => vec!["post-checkout".to_string()],
-        _ => Vec::new(),
-    }
+    migrate_present_sections(&hooks_dir, tokensave_bin)
+        .0
+        .into_iter()
+        .map(str::to_string)
+        .collect()
 }
 
 /// What [`refresh_installed_git_hooks`] rewrote, so the caller can report it.
@@ -1011,8 +1220,29 @@ pub struct HookRefresh {
     pub failed: Vec<PathBuf>,
 }
 
+impl HookRefresh {
+    /// Adds the outcome of [`migrate_present_sections`] in `dir`, listing a
+    /// file once however many of its sections changed.
+    fn record(&mut self, dir: &Path, (migrated, failed): (Vec<&str>, Vec<&str>)) {
+        for name in migrated {
+            let path = dir.join(name);
+            if !self.updated.contains(&path) {
+                self.updated.push(path);
+            }
+        }
+        for name in failed {
+            let path = dir.join(name);
+            if !self.failed.contains(&path) {
+                self.failed.push(path);
+            }
+        }
+    }
+}
+
 /// Brings tokensave's sections of already-installed git hooks up to the shape
-/// this binary writes, for `tokensave reinstall` (#624).
+/// this binary writes, for `tokensave reinstall` and the silent resync after
+/// an upgrade (#624). That includes the binary path every section names, so a
+/// moved binary is followed.
 ///
 /// Covers the global hook directory, when tokensave's global hooks are
 /// installed, and `repo`'s own hook directory, when tokensave's local hooks
@@ -1032,37 +1262,18 @@ pub fn refresh_installed_git_hooks(repo: &Path, tokensave_bin: &str) -> HookRefr
             .unwrap_or_else(|| home.join(".config").join("git").join("hooks"));
 
         let chain = migrate_global_chain_hooks(&hooks_dir);
-        result
-            .updated
-            .extend(chain.migrated.iter().map(|name| hooks_dir.join(name)));
-        result
-            .failed
-            .extend(chain.failed.iter().map(|name| hooks_dir.join(name)));
-
-        let checkout = hooks_dir.join("post-checkout");
-        if std::fs::read_to_string(&checkout).is_ok_and(|c| c.contains(HOOK_MARKER_CHECKOUT)) {
-            match install_or_migrate_block(
-                &checkout,
-                HOOK_MARKER_CHECKOUT,
-                HOOK_MARKER_CHECKOUT_END,
-                &post_checkout_snippet(tokensave_bin),
-            ) {
-                HookWrite::Migrated if !result.updated.contains(&checkout) => {
-                    result.updated.push(checkout);
-                }
-                HookWrite::Failed => result.failed.push(checkout),
-                _ => {}
-            }
-        }
+        result.record(&hooks_dir, (chain.migrated, chain.failed));
+        result.record(
+            &hooks_dir,
+            migrate_present_sections(&hooks_dir, tokensave_bin),
+        );
     }
 
     if let Some(local_dir) = repo_hooks_dir(repo) {
-        for name in migrate_local_hook_blocks(repo, tokensave_bin) {
-            let path = local_dir.join(name);
-            if !result.updated.contains(&path) {
-                result.updated.push(path);
-            }
-        }
+        result.record(
+            &local_dir,
+            migrate_present_sections(&local_dir, tokensave_bin),
+        );
     }
 
     result
@@ -1074,8 +1285,9 @@ pub fn refresh_installed_git_hooks(repo: &Path, tokensave_bin: &str) -> HookRefr
 /// install/reinstall, and reporting it here means an automatic change to a
 /// file in the user's repository is at least visible somewhere they can ask.
 ///
-/// Only `post-checkout` is versioned; the other two hooks are a single
-/// unchanging line.
+/// Only `post-checkout` is checked. The post-commit and post-merge sections
+/// are fenced since #624 and refreshed by install/reinstall and the upgrade
+/// resync, but `doctor` does not yet report them as stale.
 pub fn stale_hook_blocks(repo: &Path, tokensave_bin: &str) -> Vec<PathBuf> {
     let mut stale = Vec::new();
     let global_dir = home_dir().map(|home| {
@@ -1153,43 +1365,22 @@ pub fn install_local_git_hooks(
 
     // post-checkout carries a versioned fence, so a stale block is rewritten
     // in place here too (#342 Q1) rather than skipped for carrying *some*
-    // tokensave marker. The other two hooks are a single unchanging line and
-    // keep the additive treatment.
-    match install_or_migrate_block(
-        &hooks_dir.join("post-checkout"),
-        HOOK_MARKER_CHECKOUT,
-        HOOK_MARKER_CHECKOUT_END,
-        &post_checkout_snippet(tokensave_bin),
-    ) {
-        HookWrite::Installed => result.installed.push("post-checkout".to_string()),
-        HookWrite::Migrated => result.migrated.push("post-checkout".to_string()),
-        HookWrite::UpToDate => result.already_present.push("post-checkout".to_string()),
-        HookWrite::Failed => result.failed.push("post-checkout".to_string()),
-    }
-
-    for (name, marker, snippet) in [
-        (
-            "post-commit",
-            HOOK_MARKER,
-            post_commit_snippet(tokensave_bin),
-        ),
-        (
-            "post-merge",
-            HOOK_MARKER_MERGE,
-            post_merge_snippet(tokensave_bin),
-        ),
-    ] {
+    // tokensave marker. Since #624 post-commit and post-merge are fenced too,
+    // so an existing section of theirs is rewritten in place as well.
+    for (name, begin, end, block) in owned_hook_sections(tokensave_bin) {
         let path = hooks_dir.join(name);
-        let existing = std::fs::read_to_string(&path).ok();
-        if existing.is_some_and(|c| c.contains(marker)) {
-            result.already_present.push(name.to_string());
-            continue;
-        }
-        if write_global_hook(&path, &snippet) {
-            result.installed.push(name.to_string());
+        let write = if name == "post-checkout" {
+            install_or_migrate_block(&path, begin, end, &block)
         } else {
-            result.failed.push(name.to_string());
-        }
+            ensure_sync_section(&path, begin, end, &block)
+        };
+        let bucket = match write {
+            HookWrite::Installed => &mut result.installed,
+            HookWrite::Migrated => &mut result.migrated,
+            HookWrite::UpToDate => &mut result.already_present,
+            HookWrite::Failed => &mut result.failed,
+        };
+        bucket.push(name.to_string());
     }
     Ok(result)
 }
@@ -1296,13 +1487,20 @@ fn is_tokensave_marker(line: &str) -> bool {
     line.trim_start().starts_with("# tokensave:")
 }
 
+/// True for a line that closes one of tokensave's fenced sections
+/// ([`HOOK_MARKER_CHECKOUT_END`], [`HOOK_MARKER_END`],
+/// [`HOOK_MARKER_MERGE_END`]).
+fn is_tokensave_end_marker(line: &str) -> bool {
+    line.trim_start().starts_with("# tokensave: end ")
+}
+
 /// Remove every tokensave-owned section from a hook script.
 ///
 /// A section runs from its `# tokensave:` marker to the first blank line, to
 /// the section's own end marker, or to end of file — whichever comes first.
-/// That rule covers all three shapes that have shipped: `post-commit`, whose
-/// section is a marker plus one command and has never had an end marker; the
-/// fenced `post-checkout` section written since #391; and the unfenced
+/// That rule covers every shape that has shipped: the `post-commit` and
+/// `post-merge` sections, a marker plus one command, unfenced before #624 and
+/// fenced since; the fenced `post-checkout` section written since #391; and the unfenced
 /// `post-checkout` bodies from 6.4.3 and 7.3.0, which end in a bare `fi`
 /// followed by a blank line. [`write_global_hook`] separates every appended
 /// snippet with a blank line, so the boundary is reliable.
@@ -1320,22 +1518,26 @@ pub(crate) fn strip_tokensave_sections(contents: &str) -> Option<String> {
             out.push(line);
             continue;
         }
-        // Consume the section body. An end marker is consumed with it; a blank
-        // line is the boundary and is left for the blank-run collapse below.
-        let fenced = line.trim() == HOOK_MARKER_CHECKOUT;
+        // A stray end marker is dropped on its own; it opens nothing.
+        if is_tokensave_end_marker(line) {
+            continue;
+        }
+        // Consume the section body. An end marker is consumed with it and
+        // closes the section, so a user's line directly after it survives; a
+        // blank line is the boundary and is left for the blank-run collapse
+        // below.
         while let Some(next) = lines.peek() {
             if next.trim().is_empty() {
                 break;
             }
-            let is_end = fenced && next.trim() == HOOK_MARKER_CHECKOUT_END;
-            let stop_before = !is_end && is_tokensave_marker(next);
-            if stop_before {
+            if is_tokensave_end_marker(next) {
+                lines.next();
+                break;
+            }
+            if is_tokensave_marker(next) {
                 break;
             }
             lines.next();
-            if is_end {
-                break;
-            }
         }
     }
     // Collapse the blank runs the removals left behind.
@@ -2834,5 +3036,132 @@ mod fence_tests {
         // not migrating it at all.
         let mode = std::fs::metadata(&hook).unwrap().permissions().mode();
         assert_eq!(mode & 0o111, 0o111, "hook must stay executable");
+    }
+
+    /// #624: post-commit and post-merge are fenced now, so tokensave's line can
+    /// be found and rewritten without guessing.
+    #[test]
+    fn sync_snippets_are_fenced() {
+        let commit = post_commit_snippet("/usr/bin/tokensave");
+        assert!(commit.starts_with(HOOK_MARKER));
+        assert!(commit.trim_end().ends_with(HOOK_MARKER_END));
+        let merge = post_merge_snippet("/usr/bin/tokensave");
+        assert!(merge.starts_with(HOOK_MARKER_MERGE));
+        assert!(merge.trim_end().ends_with(HOOK_MARKER_MERGE_END));
+    }
+
+    /// #624: the unfenced marker-plus-one-line shape every release before the
+    /// fence wrote is recognised, rewritten with the current binary path, and
+    /// everything around it is kept byte-for-byte.
+    #[test]
+    fn a_legacy_post_commit_line_is_fenced_and_repointed() {
+        let dir = tempfile::tempdir().unwrap();
+        let hook = dir.path().join("post-commit");
+        let before = "#!/bin/sh\n\
+                      ./scripts/mine.sh\n\
+                      \n\
+                      # tokensave: auto-sync\n\
+                      C:/old/place/tokensave.exe sync >/dev/null 2>&1 &\n\
+                      ./scripts/after.sh\n";
+        std::fs::write(&hook, before).unwrap();
+
+        let write = install_or_migrate_block(
+            &hook,
+            HOOK_MARKER,
+            HOOK_MARKER_END,
+            &post_commit_snippet("/new/bin/tokensave"),
+        );
+        assert_eq!(write, HookWrite::Migrated);
+        let after = std::fs::read_to_string(&hook).unwrap();
+        assert_eq!(
+            after,
+            format!(
+                "#!/bin/sh\n./scripts/mine.sh\n\n{}./scripts/after.sh\n",
+                post_commit_snippet("/new/bin/tokensave")
+            )
+        );
+
+        // Second run is a no-op.
+        let again = install_or_migrate_block(
+            &hook,
+            HOOK_MARKER,
+            HOOK_MARKER_END,
+            &post_commit_snippet("/new/bin/tokensave"),
+        );
+        assert_eq!(again, HookWrite::UpToDate);
+    }
+
+    #[test]
+    fn a_legacy_post_merge_line_is_fenced_and_repointed() {
+        let dir = tempfile::tempdir().unwrap();
+        let hook = dir.path().join("post-merge");
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\n# tokensave: auto-sync (post-merge)\n/old/tokensave sync >/dev/null 2>&1 &\n",
+        )
+        .unwrap();
+
+        let write = install_or_migrate_block(
+            &hook,
+            HOOK_MARKER_MERGE,
+            HOOK_MARKER_MERGE_END,
+            &post_merge_snippet("/new/tokensave"),
+        );
+        assert_eq!(write, HookWrite::Migrated);
+        assert_eq!(
+            std::fs::read_to_string(&hook).unwrap(),
+            format!("#!/bin/sh\n{}", post_merge_snippet("/new/tokensave"))
+        );
+    }
+
+    /// A fenced sync block whose binary path changed is rewritten in place.
+    #[test]
+    fn a_fenced_post_commit_block_follows_a_moved_binary() {
+        let old = format!(
+            "#!/bin/sh\n{}# mine\n",
+            post_commit_snippet("/old/tokensave")
+        );
+        let updated = replace_fenced_block(
+            &old,
+            HOOK_MARKER,
+            HOOK_MARKER_END,
+            &post_commit_snippet("/new/tokensave"),
+        )
+        .unwrap();
+        assert_eq!(
+            updated,
+            format!(
+                "#!/bin/sh\n{}# mine\n",
+                post_commit_snippet("/new/tokensave")
+            )
+        );
+    }
+
+    /// A line after the marker that is not a sync command is not ours to
+    /// rewrite, so the legacy matcher declines it.
+    #[test]
+    fn an_unrecognised_line_after_the_sync_marker_is_left_alone() {
+        let contents = "#!/bin/sh\n# tokensave: auto-sync\n./scripts/mine.sh\n";
+        assert!(replace_legacy_sync_line(
+            contents,
+            HOOK_MARKER,
+            HOOK_MARKER_END,
+            &post_commit_snippet("/new/tokensave")
+        )
+        .is_none());
+    }
+
+    /// Removing a fenced sync block keeps a user's line that follows the end
+    /// marker directly, with no blank line between them.
+    #[test]
+    fn strip_stops_at_the_sync_end_marker() {
+        let contents = format!(
+            "#!/bin/sh\n{}./scripts/after.sh\n",
+            post_commit_snippet("/usr/bin/tokensave")
+        );
+        assert_eq!(
+            strip_tokensave_sections(&contents).unwrap(),
+            "#!/bin/sh\n./scripts/after.sh\n"
+        );
     }
 }

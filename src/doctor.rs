@@ -312,8 +312,7 @@ fn print_summary(dc: &DoctorCounters) {
     eprintln!();
 }
 
-/// Reports a `post-checkout` hook whose tokensave block is out of date (#342
-/// Q1).
+/// Reports a git hook whose tokensave section is out of date (#342 Q1, #624).
 ///
 /// Read-only: the rewrite happens on install/reinstall, not here. Surfacing it
 /// is what keeps an automatic edit to a file in the user's repository from
@@ -327,10 +326,11 @@ fn check_hook_freshness(dc: &mut DoctorCounters, project_path: &std::path::Path)
     if stale.is_empty() {
         return;
     }
+    let local_dir = tokensave_hooks::repo_hooks_dir(project_path);
     for path in stale {
-        let local_hook = tokensave_hooks::repo_hooks_dir(project_path)
-            .map(|dir| dir.join("post-checkout"))
-            .is_some_and(|local_path| local_path == path);
+        let local_hook = local_dir
+            .as_deref()
+            .is_some_and(|dir| path.parent() == Some(dir));
         let repair = if local_hook {
             format!(
                 "run `tokensave githooks on --local --path {}` to update it",
@@ -339,8 +339,11 @@ fn check_hook_freshness(dc: &mut DoctorCounters, project_path: &std::path::Path)
         } else {
             "run `tokensave reinstall` to update it".to_string()
         };
+        let hook = path
+            .file_name()
+            .map_or_else(|| "hook".into(), |n| n.to_string_lossy());
         dc.warn(&format!(
-            "git post-checkout hook at {} carries an outdated tokensave section — \
+            "git {hook} hook at {} carries an outdated tokensave section — \
              {repair} (content outside tokensave's markers is preserved)",
             path.display()
         ));

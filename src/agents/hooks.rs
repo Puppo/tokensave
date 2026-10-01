@@ -1284,35 +1284,40 @@ pub fn refresh_installed_git_hooks(repo: &Path, tokensave_bin: &str) -> HookRefr
 /// A read-only probe for `doctor`: the rewrite itself happens on
 /// install/reinstall, and reporting it here means an automatic change to a
 /// file in the user's repository is at least visible somewhere they can ask.
-///
-/// Only `post-checkout` is checked. The post-commit and post-merge sections
-/// are fenced since #624 and refreshed by install/reinstall and the upgrade
-/// resync, but `doctor` does not yet report them as stale.
 pub fn stale_hook_blocks(repo: &Path, tokensave_bin: &str) -> Vec<PathBuf> {
-    let mut stale = Vec::new();
     let global_dir = home_dir().map(|home| {
         read_global_hooks_path(&home)
             .unwrap_or_else(|| home.join(".config").join("git").join("hooks"))
     });
-    let dirs = [repo_hooks_dir(repo), global_dir];
-    let want = post_checkout_snippet(tokensave_bin);
+    [repo_hooks_dir(repo), global_dir]
+        .into_iter()
+        .flatten()
+        .flat_map(|dir| stale_sections_in(&dir, tokensave_bin))
+        .collect()
+}
 
-    for dir in dirs.into_iter().flatten() {
-        let path = dir.join("post-checkout");
+/// The hooks in `hooks_dir` whose tokensave section a refresh would rewrite.
+///
+/// A post-checkout section is stale unless it is fenced and current. A
+/// post-commit or post-merge section is stale when it is fenced and names a
+/// different binary, or still has the unfenced pre-#624 shape; any other line
+/// after the marker is not tokensave's to rewrite, so it is not reported.
+fn stale_sections_in(hooks_dir: &Path, tokensave_bin: &str) -> Vec<PathBuf> {
+    let mut stale = Vec::new();
+    for (name, begin, end, want) in owned_hook_sections(tokensave_bin) {
+        let path = hooks_dir.join(name);
         let Ok(contents) = std::fs::read_to_string(&path) else {
             continue;
         };
-        if !contents.contains(HOOK_MARKER_CHECKOUT) {
+        if !contents.contains(begin) {
             continue;
         }
-        let current = replace_fenced_block(
-            &contents,
-            HOOK_MARKER_CHECKOUT,
-            HOOK_MARKER_CHECKOUT_END,
-            &want,
-        )
-        .is_some_and(|updated| updated == contents);
-        if !current {
+        let is_stale = match replace_fenced_block(&contents, begin, end, &want) {
+            Some(updated) => updated != contents,
+            None if name == "post-checkout" => true,
+            None => replace_legacy_sync_line(&contents, begin, end, &want).is_some(),
+        };
+        if is_stale {
             stale.push(path);
         }
     }
@@ -3036,6 +3041,64 @@ mod fence_tests {
         // not migrating it at all.
         let mode = std::fs::metadata(&hook).unwrap().permissions().mode();
         assert_eq!(mode & 0o111, 0o111, "hook must stay executable");
+    }
+
+    /// #624: doctor reports a post-commit or post-merge section that names a
+    /// moved binary or still has the unfenced shape, as it does post-checkout.
+    #[test]
+    fn stale_sync_sections_are_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = "/new/tokensave";
+        std::fs::write(
+            dir.path().join("post-commit"),
+            format!("#!/bin/sh\n{}", post_commit_snippet("/old/tokensave")),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("post-merge"),
+            "#!/bin/sh\n# tokensave: auto-sync (post-merge)\n/new/tokensave sync >/dev/null 2>&1 &\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("post-checkout"),
+            format!("#!/bin/sh\n{}", post_checkout_snippet(bin)),
+        )
+        .unwrap();
+
+        let mut stale = stale_sections_in(dir.path(), bin);
+        stale.sort();
+        assert_eq!(
+            stale,
+            vec![
+                dir.path().join("post-commit"),
+                dir.path().join("post-merge")
+            ]
+        );
+
+        std::fs::write(
+            dir.path().join("post-commit"),
+            format!("#!/bin/sh\n{}", post_commit_snippet(bin)),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("post-merge"),
+            format!("#!/bin/sh\n{}", post_merge_snippet(bin)),
+        )
+        .unwrap();
+        assert!(stale_sections_in(dir.path(), bin).is_empty());
+    }
+
+    /// A line after the sync marker that is not ours is never rewritten, so
+    /// doctor must not call it stale either.
+    #[test]
+    fn an_unrecognised_sync_section_is_not_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("post-commit"),
+            "#!/bin/sh\n# tokensave: auto-sync\n./scripts/mine.sh\n",
+        )
+        .unwrap();
+        assert!(stale_sections_in(dir.path(), "/new/tokensave").is_empty());
     }
 
     /// #624: post-commit and post-merge are fenced now, so tokensave's line can

@@ -18,7 +18,7 @@ use tokensave::mcp::transport::ChannelTransport;
 use tokensave::mcp::McpServer;
 use tokensave::tokensave::TokenSave;
 
-use crate::common::qualified_test_name;
+use crate::common::{json_escaped, qualified_test_name, reported_root};
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -303,6 +303,25 @@ fn response_structured_ids(response: &Value) -> Vec<String> {
             collect_structured_ids(&value, &mut ids);
             ids
         })
+}
+
+/// A status response's text with the `sibling_projects` list removed from its
+/// JSON payload, so path checks see only what describes the answered graph.
+fn status_text_without_siblings(response: &Value) -> String {
+    response["result"]["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item["text"].as_str())
+        .map(|text| match serde_json::from_str::<Value>(text) {
+            Ok(Value::Object(mut payload)) => {
+                payload.remove("sibling_projects");
+                serde_json::to_string_pretty(&payload).unwrap()
+            }
+            _ => text.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn response_payload(response: &Value) -> Value {
@@ -826,12 +845,7 @@ async fn selected_search_is_stateless_and_preserves_local_default() {
     assert!(!selected_text.contains("local_only"), "{selected_text}");
     assert_eq!(
         selected["result"]["_meta"]["tokensave"]["graph_root"],
-        foreign_dir
-            .path()
-            .canonicalize()
-            .unwrap()
-            .display()
-            .to_string()
+        reported_root(foreign_dir.path())
     );
     assert_eq!(selected["result"]["_meta"]["tokensave"]["selected"], true);
     assert!(
@@ -1783,7 +1797,7 @@ async fn selected_warnings_use_canonical_selected_root_remedies() {
     foreign.checkpoint().await.unwrap();
     drop(foreign);
     let server = McpServer::new(local, None).await;
-    let canonical_root = foreign_dir.path().canonicalize().unwrap();
+    let canonical_root = reported_root(foreign_dir.path());
 
     let response = call_server(
         &server,
@@ -1798,7 +1812,9 @@ async fn selected_warnings_use_canonical_selected_root_remedies() {
 
     assert!(response["error"].is_null(), "{response}");
     let text = response_text(&response);
-    let quoted_root = format!("\"{}\"", canonical_root.display());
+    // Warnings quote the root as a JSON string, which doubles a Windows
+    // path's backslashes.
+    let quoted_root = serde_json::to_string(&canonical_root).unwrap();
     assert!(text.contains(&quoted_root), "{text}");
     assert!(
         text.contains("Run Tokensave synchronization from selected project root"),
@@ -3857,21 +3873,23 @@ async fn selected_status_reports_the_selected_graph() {
     .await;
     assert!(selected["error"].is_null(), "{selected}");
 
-    let text = response_text(&selected);
-    let foreign_root = foreign_dir.path().canonicalize().unwrap();
+    // Sibling projects are listed by path, and in a shared temp directory the
+    // local project is often one of them, so they are left out of the check.
+    let text = status_text_without_siblings(&selected);
+    let foreign_root = json_escaped(&reported_root(foreign_dir.path()));
+    // The local project reports its root as it was opened, which on macOS is
+    // the `/var` spelling rather than the canonical `/private/var` one, so
+    // check both.
+    let local_roots = [
+        json_escaped(&reported_root(local_dir.path())),
+        json_escaped(&local_dir.path().to_string_lossy()),
+    ];
     assert!(
-        text.contains(&foreign_root.display().to_string()),
+        text.contains(&foreign_root),
         "status should describe the selected project: {text}"
     );
     assert!(
-        !text.contains(
-            &local_dir
-                .path()
-                .canonicalize()
-                .unwrap()
-                .display()
-                .to_string()
-        ),
+        !local_roots.iter().any(|root| text.contains(root.as_str())),
         "status must not describe the local project: {text}"
     );
     assert_eq!(selected["result"]["_meta"]["tokensave"]["selected"], true);
@@ -3879,9 +3897,15 @@ async fn selected_status_reports_the_selected_graph() {
     // The local call still answers for the server's own project.
     let local_status = call_server(&server, 72, "tokensave_status", json!({})).await;
     assert!(local_status["error"].is_null(), "{local_status}");
-    let local_text = response_text(&local_status);
+    let local_text = status_text_without_siblings(&local_status);
     assert!(
-        !local_text.contains(&foreign_root.display().to_string()),
+        local_roots
+            .iter()
+            .any(|root| local_text.contains(root.as_str())),
+        "an unselected status must answer for the local project: {local_text}"
+    );
+    assert!(
+        !local_text.contains(&foreign_root),
         "an unselected status must still answer for the local project: {local_text}"
     );
     let _ = local_dir;

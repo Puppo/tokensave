@@ -28,6 +28,8 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 use tempfile::TempDir;
+
+use crate::common::reported_root;
 use tokensave::mcp::transport::ChannelTransport;
 use tokensave::mcp::McpServer;
 use tokensave::tokensave::TokenSave;
@@ -229,10 +231,19 @@ async fn worktrees_of_one_repo_collapse_to_a_single_root() {
 
     // The repo kept is the one named first, so the caller's ordering decides
     // which checkout represents the repository.
-    let main_path = main.canonicalize().unwrap().to_string_lossy().to_string();
+    let main_path = reported_root(&main);
     assert!(
         text.contains(&format!("federated across 1 root(s): {main_path}")),
         "the first-named checkout must be the one kept, got: {text}"
+    );
+    // The collapsed checkout is named the same way as the kept one: no
+    // Windows `\\?\` verbatim prefix leaking through from the caller.
+    let wt_path = reported_root(&wt);
+    assert!(
+        text.contains(&format!(
+            "sharing a repository with a root above: {wt_path}"
+        )),
+        "the collapsed checkout must be named as reported roots are, got: {text}"
     );
 }
 

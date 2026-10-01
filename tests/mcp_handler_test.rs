@@ -439,6 +439,12 @@ async fn test_callers_nonexistent_node_id_errors() {
         msg.contains("node not found"),
         "expected a node-not-found error, got: {msg}"
     );
+    // #576: tokensave_callers_for is not a core tool, so the error says how
+    // to list it.
+    assert!(
+        msg.contains("tokensave_callers_for (via tokensave_more area \"navigate\""),
+        "{msg}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -6989,7 +6995,12 @@ async fn entities_marks_files_that_have_companion_docs() {
     let parsed: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
     assert_eq!(parsed["has_doc"], true, "{parsed:?}");
     assert_eq!(parsed["doc_path"], json!(["src/big_class.readme.md"]));
-    assert!(parsed["doc_hint"].is_string(), "{parsed:?}");
+    // #576: tokensave_doc is not a core tool, so the hint says how to list it.
+    let hint = parsed["doc_hint"].as_str().expect("doc_hint");
+    assert!(
+        hint.contains("tokensave_doc") && hint.contains("tokensave_more area \"navigate\""),
+        "{hint}"
+    );
 }
 
 #[tokio::test]

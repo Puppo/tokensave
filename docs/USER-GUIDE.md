@@ -833,9 +833,9 @@ When running as an MCP server, tokensave exposes more than 80 tools that AI agen
 
 ### Listing fewer tools
 
-A client sends the schema of every listed tool on every turn, before any tool is called, so the full list costs context whether or not the tools are used. `"tools": "core"` in `.tokensave/config.json`, or `TOKENSAVE_TOOLS=core`, lists 11 tools instead: `context`, `search`, `status`, `read`, `body`, `files`, `callers`, `callees`, `impact`, `str_replace` and `multi_str_replace`. With the core list, `tokensave_more` lists the tools of one area (`analysis`, `edit`, `git`, `memory`, `navigate`, or `all`) for the rest of the session. The server announces the change, so the client fetches the list again.
+A client sends the schema of every listed tool on every turn, before any tool is called, so the full list costs context whether or not the tools are used. By default the server lists 11 core tools: `context`, `search`, `status`, `read`, `body`, `files`, `callers`, `callees`, `impact`, `str_replace` and `multi_str_replace`, plus `tokensave_more`, which lists the tools of one area (`analysis`, `edit`, `git`, `memory`, `navigate`, or `all`) for the rest of the session. The server announces the change, so the client fetches the list again. The `initialize` instructions name the core tools and the areas, so an agent that has not seen a tool's schema still knows how to reach it.
 
-The setting chooses what is listed, not what runs: a tool that is not listed still answers a call, so permission lists and hooks keep working. The default is `"full"`.
+The setting chooses what is listed, not what runs: a tool that is not listed still answers a call, so permission lists and hooks keep working. To list every tool, set `"tools": "full"` in `.tokensave/config.json` or `TOKENSAVE_TOOLS=full` (the environment variable wins). A `"tools": "full"` written by 7.13.0, which wrote that value into every config it saved, is read as the old default; set it again after upgrading to keep the full list.
 
 ### Core exploration
 

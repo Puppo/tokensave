@@ -279,12 +279,26 @@ impl TokenSave {
         let open_result = Database::open(&db_path).await;
         let (db, migrated) = match open_result {
             Ok(pair) => pair,
-            Err(ref e)
-                if Database::is_corruption_error(e)
+            Err(e)
+                if Database::is_corruption_error(&e)
                     || crashed
-                    || (rebuild_failed_migration && Database::is_migration_error(e)) =>
+                    || (rebuild_failed_migration && Database::is_migration_error(&e)) =>
             {
-                if Database::is_migration_error(e) {
+                // Never delete a database over a condition that clears by
+                // itself, or while another tokensave process is using it:
+                // the holder would keep writing to an unlinked file.
+                if crate::db::migrations::is_environmental_error(&e) {
+                    return Err(e);
+                }
+                let lock = match rebuild_refusal(project_root, &db_path) {
+                    Ok(lock) => lock,
+                    Err(refusal) => {
+                        return Err(TokenSaveError::Config {
+                            message: format!("{e}\nNot rebuilding the database: {refusal}"),
+                        });
+                    }
+                };
+                if Database::is_migration_error(&e) {
                     eprintln!("[tokensave] {e}\n[tokensave] rebuilding the database…");
                 } else {
                     print_corruption_warning();
@@ -292,6 +306,8 @@ impl TokenSave {
                 delete_db_files(&db_path);
                 clear_dirty_sentinel(project_root);
                 let (db, _) = Database::initialize(&db_path).await?;
+                // The index pass below takes the sync lock itself.
+                drop(lock);
                 let ts = Self {
                     db,
                     max_auto_sync_files: config.max_auto_sync_files,

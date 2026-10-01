@@ -402,7 +402,7 @@ pub async fn migrate(conn: &Connection) -> Result<bool> {
         .await
         .map_err(|e| TokenSaveError::Database {
             message: format!("failed to acquire exclusive lock: {e}"),
-            operation: "migrate".to_string(),
+            operation: "migrate_lock".to_string(),
         })?;
 
     // Re-read inside the lock in case another process migrated between our
@@ -417,12 +417,25 @@ pub async fn migrate(conn: &Connection) -> Result<bool> {
                 .await
                 .map_err(|e| TokenSaveError::Database {
                     message: format!("failed to commit migrations: {e}"),
-                    operation: "migrate".to_string(),
+                    operation: "migrate_commit".to_string(),
                 })?;
             Ok(true)
         }
         Err(e) => {
             let _ = conn.execute("ROLLBACK", ()).await;
+            // A busy, locked, full or failing disk is not a broken schema: the
+            // same migration succeeds once the condition clears, and the data
+            // must not be thrown away for it. Those keep their own error.
+            if is_environmental_error(&e) {
+                return Err(TokenSaveError::Database {
+                    message: format!(
+                        "schema migration v{current} → v{LATEST_VERSION} could not run ({e}). \
+                         Retry once no other tokensave process is using the index and the \
+                         disk has room."
+                    ),
+                    operation: "migrate_environment".to_string(),
+                });
+            }
             // The transaction rolled back, so the database is still the old
             // version and every later open fails the same way. Say how out:
             // `sync --force` rebuilds a database whose migration fails.
@@ -437,8 +450,40 @@ pub async fn migrate(conn: &Connection) -> Result<bool> {
     }
 }
 
-/// `operation` of the error [`migrate`] returns when a migration fails.
-pub const MIGRATION_FAILED: &str = "migrate";
+/// `operation` of the error [`migrate`] returns when a migration step itself
+/// fails, and only then. Taking the lock, committing, and a step that fails
+/// for an environmental reason (see [`is_environmental_error`]) report other
+/// operations, because `sync --force` deletes and rebuilds a database whose
+/// error carries this one.
+pub const MIGRATION_FAILED: &str = "migrate_schema";
+
+/// True for an error caused by the database's surroundings rather than its
+/// content: another connection holding a lock, a full disk, an I/O failure,
+/// a read-only file. Retrying later is the remedy; rebuilding is not.
+#[must_use]
+pub fn is_environmental_error(e: &TokenSaveError) -> bool {
+    let message = match e {
+        TokenSaveError::Database { message, .. } => message.to_ascii_lowercase(),
+        _ => return false,
+    };
+    [
+        "database is locked",
+        "database is busy",
+        "database table is locked",
+        "misuse",
+        "disk i/o",
+        "i/o error",
+        "disk is full",
+        "database or disk is full",
+        "no space",
+        "readonly",
+        "read-only",
+        "unable to open",
+        "interrupted",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+}
 
 /// Applies migrations sequentially from `current` up to `LATEST_VERSION`.
 async fn run_migrations(conn: &Connection, current: u32) -> Result<()> {
@@ -1609,9 +1654,10 @@ async fn migrate_v17(conn: &Connection) -> Result<()> {
 async fn indexes_naming(conn: &Connection, table: &str, column: &str) -> Result<Vec<String>> {
     let mut rows = conn
         .query(
+            // `instr`, not `LIKE`: `_` in a column name is a LIKE wildcard.
             "SELECT name FROM sqlite_master
-             WHERE type = 'index' AND tbl_name = ?1 AND sql IS NOT NULL AND sql LIKE ?2",
-            params![table, format!("%{column}%")],
+             WHERE type = 'index' AND tbl_name = ?1 AND sql IS NOT NULL AND instr(sql, ?2) > 0",
+            params![table, column],
         )
         .await
         .map_err(|e| TokenSaveError::Database {

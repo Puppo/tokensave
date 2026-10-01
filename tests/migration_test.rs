@@ -1643,3 +1643,49 @@ async fn test_failed_migration_is_recoverable_by_a_forced_rebuild() {
         .expect("a forced rebuild recovers");
     assert!(!cg.get_nodes_by_name("f").await.expect("query").is_empty());
 }
+
+/// A failed migration is not rebuilt while another tokensave process holds
+/// the project's sync lock: deleting the database under it would leave that
+/// process writing to an unlinked file.
+#[tokio::test]
+async fn test_forced_rebuild_is_refused_while_the_sync_lock_is_held() {
+    use tokensave::tokensave::TokenSave;
+    let dir = TempDir::new().expect("temp dir");
+    std::fs::write(dir.path().join("lib.rs"), "pub fn f() {}\n").expect("write source");
+    let cg = TokenSave::init(dir.path()).await.expect("init");
+    cg.index_all().await.expect("index");
+    drop(cg);
+
+    let db_path = dir.path().join(".tokensave/tokensave.db");
+    {
+        let db = Builder::new_local(&db_path).build().await.expect("db");
+        let conn = db.connect().expect("conn");
+        conn.execute_batch(
+            "ALTER TABLE edges DROP COLUMN resolved_by;
+             ALTER TABLE edges ADD COLUMN resolved_by TEXT NOT NULL DEFAULT 'direct';
+             CREATE VIEW legacy_provenance AS SELECT resolved_by FROM edges;
+             PRAGMA user_version = 17;",
+        )
+        .await
+        .expect("simulate a v17 database whose migration fails");
+    }
+    let before = std::fs::read(&db_path).expect("read db");
+
+    // A live process (this one) holds the sync lock.
+    let lock = dir.path().join(".tokensave/sync.lock");
+    std::fs::write(&lock, std::process::id().to_string()).expect("write lock");
+
+    let err = match TokenSave::open_rebuilding_failed_migration(dir.path()).await {
+        Ok(_) => panic!("the rebuild must be refused"),
+        Err(e) => e.to_string(),
+    };
+    assert!(err.contains("Not rebuilding the database"), "{err}");
+    assert_eq!(std::fs::read(&db_path).expect("read db"), before);
+
+    // Once the lock is gone the same call rebuilds.
+    std::fs::remove_file(&lock).expect("release lock");
+    let cg = TokenSave::open_rebuilding_failed_migration(dir.path())
+        .await
+        .expect("rebuild");
+    assert!(!cg.get_nodes_by_name("f").await.expect("query").is_empty());
+}

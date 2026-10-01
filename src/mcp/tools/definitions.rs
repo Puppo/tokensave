@@ -1228,13 +1228,13 @@ fn def_rename_preview() -> ToolDefinition {
 /// caller does not read a binding-aware guarantee into it (#568).
 pub const RENAME_DESCRIPTION: &str = "Rename a symbol at its definition and every reference \
      the code graph records. Graph-based, NOT binding-aware: references come from a name-based \
-     resolver, not each language's scope rules, so shadowing, dynamic calls or `**kwargs` can \
-     be missed. Each site has a class: `exact` = bound by a qualified path, typed receiver, \
-     import, or a name no other symbol has, located to one token; `heuristic` = bound by a \
-     name fallback (`recv.method` tail, scoring among same-named candidates, blocklisted \
-     names, build variants), an override paired by name, or a token not distinguishable on its \
-     line; `ambiguous` = a call the resolver could not decide; `text_only` = a whole-word \
-     mention the graph does not link (comment, string, doc, unlinked identifier). dry_run \
+     resolver, not scope rules, so shadowing, dynamic calls or `**kwargs` can be missed. Each \
+     site has a class: `exact` = bound by a qualified path, typed receiver, import, or a name \
+     no other symbol has, located to one token; `heuristic` = a name fallback (`recv.method` \
+     tail, scoring among same-named candidates, blocklisted names, build variants), an \
+     override paired by name, or a token not distinguishable on its line; `ambiguous` = a call \
+     the resolver could not decide; `text_only` = a whole-word mention the graph does not link \
+     (comment, string, doc, unlinked identifier). Only indexed files are scanned. dry_run \
      (default true) returns sites by file, counts per class and a unified diff. Applying \
      refuses while any site is heuristic or ambiguous, or an unlinked identifier exists, unless \
      allow_heuristic=true; ambiguous and text_only sites are never edited. All-or-nothing: \

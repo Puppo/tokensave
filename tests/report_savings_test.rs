@@ -21,9 +21,9 @@ use tokensave::mcp::transport::ChannelTransport;
 use tokensave::mcp::McpServer;
 use tokensave::tokensave::TokenSave;
 
-/// Creates and indexes a project, optionally turning `report_savings` off
-/// before the server opens it.
-async fn setup_server(report_savings: bool) -> (TempDir, Arc<McpServer>) {
+/// Creates and indexes a project. `Some(value)` writes `report_savings` to
+/// the config before the server opens it; `None` leaves the default.
+async fn setup_server(report_savings: Option<bool>) -> (TempDir, Arc<McpServer>) {
     let dir = TempDir::new().unwrap();
     let project = dir.path();
     std::fs::create_dir_all(project.join("src")).unwrap();
@@ -36,9 +36,9 @@ async fn setup_server(report_savings: bool) -> (TempDir, Arc<McpServer>) {
     cg.index_all().await.unwrap();
     drop(cg);
 
-    if !report_savings {
+    if let Some(report_savings) = report_savings {
         let mut config = tokensave::config::load_config(project).unwrap();
-        config.report_savings = false;
+        config.report_savings = report_savings;
         tokensave::config::save_config(project, &config).unwrap();
     }
 
@@ -92,19 +92,29 @@ async fn initialize_instructions(server: &Arc<McpServer>) -> String {
 }
 
 #[tokio::test]
-async fn metrics_line_is_emitted_by_default() {
-    // The default must stay on — this is a diagnostic users rely on, and #356
-    // asked for a way to opt out, not for a change of default.
-    let (_dir, server) = setup_server(true).await;
+async fn metrics_line_is_off_by_default() {
+    // #561: reporting is off by default so MCP results stay compact.
+    let (_dir, server) = setup_server(None).await;
+    let text = search_text(&server).await;
+    assert!(
+        !text.contains("tokensave_metrics:"),
+        "default configuration must not surface savings; got: {text}"
+    );
+    assert!(!text.is_empty(), "the result itself must still be returned");
+}
+
+#[tokio::test]
+async fn metrics_line_is_emitted_when_reporting_is_on() {
+    let (_dir, server) = setup_server(Some(true)).await;
     assert!(
         search_text(&server).await.contains("tokensave_metrics:"),
-        "default configuration must keep surfacing savings"
+        "report_savings = true must surface savings"
     );
 }
 
 #[tokio::test]
 async fn metrics_line_is_suppressed_when_reporting_is_off() {
-    let (_dir, server) = setup_server(false).await;
+    let (_dir, server) = setup_server(Some(false)).await;
     let text = search_text(&server).await;
     assert!(
         !text.contains("tokensave_metrics:"),
@@ -118,15 +128,23 @@ async fn metrics_line_is_suppressed_when_reporting_is_off() {
 
 #[tokio::test]
 async fn instructions_ask_for_narration_only_when_reporting_is_on() {
-    let (_dir, on) = setup_server(true).await;
+    let (_dir, on) = setup_server(Some(true)).await;
     assert!(
         initialize_instructions(&on)
             .await
             .contains("report the savings"),
-        "default instructions should still ask for the report"
+        "report_savings = true must ask for the report"
     );
 
-    let (_dir, off) = setup_server(false).await;
+    let (_dir, default) = setup_server(None).await;
+    assert!(
+        !initialize_instructions(&default)
+            .await
+            .contains("report the savings"),
+        "the default (off) must not ask for the report"
+    );
+
+    let (_dir, off) = setup_server(Some(false)).await;
     let quiet = initialize_instructions(&off).await;
     assert!(
         !quiet.contains("report the savings"),
@@ -143,7 +161,7 @@ async fn savings_are_still_accounted_when_reporting_is_off() {
     // The point of the flag is to stop the model talking about savings, not to
     // stop measuring them. The savings ledger is what `tokensave gain` reads,
     // so that is what has to keep growing with reporting off.
-    let (dir, server) = setup_server(false).await;
+    let (dir, server) = setup_server(Some(false)).await;
     let project = tokensave::global_db::normalize_project_key(dir.path());
     let gdb = tokensave::global_db::GlobalDb::open().await.unwrap();
     let calls_before = gdb.sum_savings(Some(&project), 0).await.calls;

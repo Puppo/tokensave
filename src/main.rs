@@ -273,6 +273,19 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                     ag.install(&ctx).is_ok()
                 });
             if outcome.changed {
+                // #624: an upgrade also brings tokensave's section of hooks
+                // that are already installed up to this binary's shape, global
+                // and this repository's own, so a user who never runs
+                // `reinstall` is not left on the old one. Nothing is
+                // installed; only sections tokensave already wrote change.
+                // Every write names itself (#419), since the user did not ask
+                // for it.
+                let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+                report_hook_refresh(&tokensave::agents::refresh_installed_git_hooks(
+                    &cwd,
+                    &current_bin_path(),
+                ));
+
                 // Refresh a tokensave-owned Claude rules file that exists on
                 // disk even when `claude` is not in `installed_agents` (#553).
                 // A user may register tokensave per project (`.mcp.json`) or
@@ -967,6 +980,17 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                     eprintln!("{warning}");
                 }
             }
+
+            // #624: hooks are not an agent, so the loop above never touched
+            // them, and the hook migrations an upgrade ships only reached a
+            // user who also ran `githooks on`. Refresh tokensave's section of
+            // hooks that are already installed — global ones, and this
+            // repository's own — without installing any that are not.
+            let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+            report_hook_refresh(&tokensave::agents::refresh_installed_git_hooks(
+                &cwd,
+                &current_bin_path(),
+            ));
         }
         Commands::Uninstall {
             agent,
@@ -1845,6 +1869,31 @@ fn should_skip_agent_install_maintenance(command: &Commands) -> bool {
             | Commands::HookKiroPostToolUse
             | Commands::HookDroidPreToolUse
     )
+}
+
+/// Print what `refresh_installed_git_hooks` changed (#624). Silent when
+/// nothing needed rewriting, so an up-to-date machine sees no output.
+fn report_hook_refresh(refresh: &tokensave::agents::HookRefresh) {
+    for path in &refresh.updated {
+        eprintln!(
+            "\x1b[32m✔\x1b[0m Updated tokensave's section of the git hook at {} \
+             (your own content in that file was left untouched)",
+            path.display()
+        );
+    }
+    if !refresh.failed.is_empty() {
+        let names: Vec<String> = refresh
+            .failed
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
+        eprintln!(
+            "\x1b[33mwarning:\x1b[0m could not refresh git hooks: {}.\n  \
+             Run \x1b[1mtokensave githooks on\x1b[0m (or \x1b[1mgithooks on --local\x1b[0m \
+             inside the repository) to retry.",
+            names.join(", ")
+        );
+    }
 }
 
 /// Print what `remove_git_hooks` did. Says so explicitly when it found

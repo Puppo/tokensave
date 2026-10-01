@@ -141,6 +141,7 @@ mod qbasic_extraction_test;
 mod quickbasic_extraction_test;
 mod quint_extraction_test;
 mod rake_support_test;
+mod reinstall_githooks_624_test;
 mod report_savings_test;
 mod resolution_order_independence_test;
 mod resolution_slim_nodes_test;

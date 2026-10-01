@@ -332,7 +332,15 @@ fn migrate_chain_repo_hook(contents: &str, hook_name: &str) -> Option<String> {
     ))
 }
 
-fn migrate_global_chain_hooks(hooks_dir: &Path) -> Vec<&'static str> {
+/// Which global hook files [`migrate_global_chain_hooks`] rewrote, and which
+/// it could not.
+#[derive(Debug, Default)]
+struct ChainMigration {
+    migrated: Vec<&'static str>,
+    failed: Vec<&'static str>,
+}
+
+fn migrate_global_chain_hooks(hooks_dir: &Path) -> ChainMigration {
     let owned = ["post-commit", "post-checkout", "post-merge"];
     let names = owned.iter().copied().chain(
         FORWARDED_REPO_HOOKS
@@ -340,7 +348,7 @@ fn migrate_global_chain_hooks(hooks_dir: &Path) -> Vec<&'static str> {
             .copied()
             .filter(|name| !owned.contains(name)),
     );
-    let mut failed = Vec::new();
+    let mut result = ChainMigration::default();
     for name in names {
         let path = hooks_dir.join(name);
         let Ok(contents) = std::fs::read_to_string(&path) else {
@@ -350,10 +358,12 @@ fn migrate_global_chain_hooks(hooks_dir: &Path) -> Vec<&'static str> {
             continue;
         };
         if std::fs::write(&path, migrated).is_err() {
-            failed.push(name);
+            result.failed.push(name);
+        } else {
+            result.migrated.push(name);
         }
     }
-    failed
+    result
 }
 
 /// Client-side git hooks that tokensave does **not** itself install, but whose
@@ -748,7 +758,7 @@ pub fn offer_git_post_commit_hook(tokensave_bin: &str, mode: GitHookMode) -> Res
     // Migrate existing tokensave-owned chain preambles before writing any
     // other hook sections. This repairs linked-worktree forwarding without
     // touching unrelated user content.
-    let mut failed: Vec<&str> = migrate_global_chain_hooks(&hooks_dir);
+    let mut failed: Vec<&str> = migrate_global_chain_hooks(&hooks_dir).failed;
 
     // If no global hooksPath was configured, set it in ~/.gitconfig.
     if need_set_hookspath {
@@ -989,6 +999,73 @@ pub fn migrate_local_hook_blocks(repo: &Path, tokensave_bin: &str) -> Vec<String
         HookWrite::Migrated => vec!["post-checkout".to_string()],
         _ => Vec::new(),
     }
+}
+
+/// What [`refresh_installed_git_hooks`] rewrote, so the caller can report it.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct HookRefresh {
+    /// Hook files whose tokensave section was rewritten in place.
+    pub updated: Vec<PathBuf>,
+    /// Hook files whose rewrite was attempted and failed. The reason was
+    /// printed at the point of failure.
+    pub failed: Vec<PathBuf>,
+}
+
+/// Brings tokensave's sections of already-installed git hooks up to the shape
+/// this binary writes, for `tokensave reinstall` (#624).
+///
+/// Covers the global hook directory, when tokensave's global hooks are
+/// installed, and `repo`'s own hook directory, when tokensave's local hooks
+/// are installed there. It is a refresh, not an install: a hook that does not
+/// already carry tokensave's marker is left alone, no new hook file is
+/// created, and `core.hooksPath` is never set. A user who never opted into
+/// hooks gets none from a reinstall.
+///
+/// As with [`migrate_local_hook_blocks`], no prompt is needed (#342 Q1): only
+/// tokensave's own sections are rewritten, and everything outside them is
+/// preserved byte-for-byte.
+pub fn refresh_installed_git_hooks(repo: &Path, tokensave_bin: &str) -> HookRefresh {
+    let mut result = HookRefresh::default();
+
+    if let Some(home) = home_dir().filter(|_| global_git_hooks_installed()) {
+        let hooks_dir = read_global_hooks_path(&home)
+            .unwrap_or_else(|| home.join(".config").join("git").join("hooks"));
+
+        let chain = migrate_global_chain_hooks(&hooks_dir);
+        result
+            .updated
+            .extend(chain.migrated.iter().map(|name| hooks_dir.join(name)));
+        result
+            .failed
+            .extend(chain.failed.iter().map(|name| hooks_dir.join(name)));
+
+        let checkout = hooks_dir.join("post-checkout");
+        if std::fs::read_to_string(&checkout).is_ok_and(|c| c.contains(HOOK_MARKER_CHECKOUT)) {
+            match install_or_migrate_block(
+                &checkout,
+                HOOK_MARKER_CHECKOUT,
+                HOOK_MARKER_CHECKOUT_END,
+                &post_checkout_snippet(tokensave_bin),
+            ) {
+                HookWrite::Migrated if !result.updated.contains(&checkout) => {
+                    result.updated.push(checkout);
+                }
+                HookWrite::Failed => result.failed.push(checkout),
+                _ => {}
+            }
+        }
+    }
+
+    if let Some(local_dir) = repo_hooks_dir(repo) {
+        for name in migrate_local_hook_blocks(repo, tokensave_bin) {
+            let path = local_dir.join(name);
+            if !result.updated.contains(&path) {
+                result.updated.push(path);
+            }
+        }
+    }
+
+    result
 }
 
 /// Hook files whose tokensave block is present but out of date (#342 Q1).

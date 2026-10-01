@@ -7,6 +7,8 @@ and this project uses [maintenance-based versioning](TOKENSAVE-VERSIONING.md), n
 
 ## [Unreleased]
 
+### Fixed
+- **`tokensave reinstall` refreshes tokensave's section of installed git hooks (#624).** `reinstall` only replayed agent integrations, so the hook migrations an upgrade ships (the 7.13.0 `--git-common-dir` chain preamble, the versioned post-checkout block from #342 Q1) reached only users who also ran `tokensave githooks on`, even though `doctor` names `reinstall` as the fix for a stale global hook. `reinstall` now rewrites tokensave's fenced sections of hooks that already carry its markers, in the global hook directory and in the current repository's own hooks, preserving everything outside the markers. It is a refresh, not an install: no hook is added where tokensave had none, and `core.hooksPath` is never set. Reported by @Zindaar.
 
 ## [7.13.0] - 2026-09-29
 

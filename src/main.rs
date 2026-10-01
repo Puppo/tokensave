@@ -967,6 +967,33 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                     eprintln!("{warning}");
                 }
             }
+
+            // #624: hooks are not an agent, so the loop above never touched
+            // them, and the hook migrations an upgrade ships only reached a
+            // user who also ran `githooks on`. Refresh tokensave's section of
+            // hooks that are already installed — global ones, and this
+            // repository's own — without installing any that are not.
+            let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+            let refresh = tokensave::agents::refresh_installed_git_hooks(&cwd, &current_bin_path());
+            for path in &refresh.updated {
+                eprintln!(
+                    "\x1b[32m✔\x1b[0m Updated tokensave's section of the git hook at {} \
+                     (your own content in that file was left untouched)",
+                    path.display()
+                );
+            }
+            if !refresh.failed.is_empty() {
+                let names: Vec<String> = refresh
+                    .failed
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect();
+                eprintln!(
+                    "\x1b[33mwarning:\x1b[0m could not refresh git hooks: {}.\n  \
+                     Run \x1b[1mtokensave githooks on\x1b[0m to retry.",
+                    names.join(", ")
+                );
+            }
         }
         Commands::Uninstall {
             agent,

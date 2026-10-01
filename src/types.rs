@@ -785,6 +785,11 @@ pub struct AmbiguousCall {
     pub file_path: String,
     /// Line of the call site.
     pub line: u32,
+    /// Column of the call site. Held in memory only, to tell apart two calls
+    /// on one line while a resolution pass runs (#597); it is not stored, so
+    /// a record read back from the database carries 0.
+    #[serde(skip)]
+    pub column: u32,
     /// The candidates that could not be separated.
     pub candidate_node_ids: Vec<String>,
 }

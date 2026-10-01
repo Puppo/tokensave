@@ -901,4 +901,130 @@ func _fields() -> Array[String]:\n\treturn [\"mass\", \"weight\"]\n",
             "the uncalled base method stays dead, got {by_file:?}"
         );
     }
+
+    /// Every edge as `source|target|kind|line`, comparable across two trees
+    /// (node ids hash file, kind, name and line, not the database).
+    async fn edge_set(cg: &TokenSave) -> BTreeSet<String> {
+        cg.get_all_edges()
+            .await
+            .unwrap()
+            .iter()
+            .map(|e| format!("{}|{}|{:?}|{:?}", e.source, e.target, e.kind, e.line))
+            .collect()
+    }
+
+    /// Whether `from_file::from` has a `calls` edge into `to_file::to`.
+    async fn calls(cg: &TokenSave, from_file: &str, from: &str, to_file: &str, to: &str) -> bool {
+        let nodes = cg.get_all_nodes().await.unwrap();
+        let source = node(&nodes, from_file, from).id.clone();
+        let target = node(&nodes, to_file, to).id.clone();
+        cg.get_all_edges()
+            .await
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == EdgeKind::Calls && e.source == source && e.target == target)
+    }
+
+    const OTHER: &str = "class_name Other\nextends RefCounted\n\n\n\
+func subscribe(cb) -> void:\n\tpass\n";
+
+    /// #597 review: a resolved typed ref must only replace its own sibling,
+    /// not a different same-named call on the same line.
+    #[tokio::test]
+    async fn typed_ref_does_not_suppress_another_call_on_the_same_line() {
+        let dir = TempDir::new().unwrap();
+        write(dir.path(), "bus.gd", BUS);
+        write(dir.path(), "other.gd", OTHER);
+        write(
+            dir.path(),
+            "runner.gd",
+            "class_name Runner\nextends RefCounted\n\n\n\
+func run(given: Bus, o) -> void:\n\
+\tgiven.subscribe(o.subscribe(1))\n",
+        );
+        write(
+            dir.path(),
+            "user.gd",
+            "class_name User\nextends RefCounted\n\n\n\
+func run2(given: Bus) -> void:\n\
+\tgiven.subscribe(subscribe(1))\n\n\n\
+func subscribe(x) -> int:\n\treturn x\n",
+        );
+        let cg = full_index(dir.path()).await;
+
+        assert!(
+            calls(&cg, "user.gd", "run2", "bus.gd", "subscribe").await,
+            "the typed call reaches Bus.subscribe"
+        );
+        assert!(
+            calls(&cg, "user.gd", "run2", "user.gd", "subscribe").await,
+            "the bare inner call on the same line keeps its edge to User.subscribe"
+        );
+        // `o.subscribe` is untyped and ties between Bus, Other and User: that
+        // ambiguity must survive the typed call on the same line, or dead_code
+        // reports Other.subscribe.
+        let dead = cg.find_dead_code(&[], true, false).await.unwrap();
+        assert!(
+            !dead
+                .iter()
+                .any(|n| n.file_path == "other.gd" && n.name == "subscribe"),
+            "Other.subscribe is an ambiguity candidate, not dead"
+        );
+    }
+
+    /// #597 review: a typed edge depends on declarations in third files. When
+    /// one changes, an incremental sync must end where a fresh index does.
+    #[tokio::test]
+    async fn typed_edges_follow_changed_declarations_incrementally() {
+        let hub = "class_name Hub\nextends Bus\n";
+        let user = "class_name User\nextends RefCounted\n\nvar bus: Bus\n\n\n\
+func make_bus() -> Bus:\n\treturn null\n";
+        let caller = "class_name Caller\nextends RefCounted\n\n\n\
+func go2(u: User) -> void:\n\tu.bus.subscribe(1)\n\n\n\
+func go3(u: User) -> void:\n\tu.make_bus().subscribe(1)\n\n\n\
+func go4(h: Hub) -> void:\n\th.subscribe(1)\n";
+        let seed = |root: &Path| {
+            write(root, "bus.gd", BUS);
+            write(root, "other.gd", OTHER);
+            write(root, "hub.gd", hub);
+            write(root, "user.gd", user);
+            write(root, "caller.gd", caller);
+        };
+        let inc_dir = TempDir::new().unwrap();
+        seed(inc_dir.path());
+        let inc = full_index(inc_dir.path()).await;
+        assert!(calls(&inc, "caller.gd", "go2", "bus.gd", "subscribe").await);
+        assert!(calls(&inc, "caller.gd", "go3", "bus.gd", "subscribe").await);
+        assert!(calls(&inc, "caller.gd", "go4", "bus.gd", "subscribe").await);
+
+        let edits: [(&str, &str, &str); 3] = [
+            ("untype a member", "user.gd", "var bus: Bus\n"),
+            ("change a return type", "user.gd", "-> Bus:"),
+            ("change an extends base", "hub.gd", "extends Bus"),
+        ];
+        let replacements = ["var bus\n", "-> Other:", "extends RefCounted"];
+        for ((name, file, from), to) in edits.into_iter().zip(replacements) {
+            let path = inc_dir.path().join(file);
+            let text = fs::read_to_string(&path).unwrap();
+            assert!(text.contains(from), "{name}: fixture must contain {from:?}");
+            fs::write(&path, text.replacen(from, to, 1)).unwrap();
+            inc.sync().await.unwrap();
+
+            let full_dir = TempDir::new().unwrap();
+            for rel in ["bus.gd", "other.gd", "hub.gd", "user.gd", "caller.gd"] {
+                fs::copy(inc_dir.path().join(rel), full_dir.path().join(rel)).unwrap();
+            }
+            let full = full_index(full_dir.path()).await;
+            assert_eq!(
+                edge_set(&inc).await,
+                edge_set(&full).await,
+                "after {name}: incremental sync and a fresh index disagree"
+            );
+        }
+        // The end state the comparison pins, spelled out.
+        assert!(!calls(&inc, "caller.gd", "go2", "bus.gd", "subscribe").await);
+        assert!(calls(&inc, "caller.gd", "go3", "other.gd", "subscribe").await);
+        assert!(!calls(&inc, "caller.gd", "go3", "bus.gd", "subscribe").await);
+        assert!(!calls(&inc, "caller.gd", "go4", "bus.gd", "subscribe").await);
+    }
 }

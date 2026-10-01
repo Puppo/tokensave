@@ -219,14 +219,23 @@ const GDSCRIPT_TYPED: &str = "gdscript-typed-receiver";
 /// `GDScript` is deliberately absent from [`lang_from_path`]: a `.gd` call into
 /// a godot-cpp method (#269) relies on the cross-language confidence that an
 /// unknown language gets, so the tag would drop those edges.
-fn is_gdscript(path: &str) -> bool {
-    path.rsplit('.').next() == Some("gd")
+///
+/// Case-insensitive, to agree with the SQL side, which selects `.gd` rows with
+/// `LIKE '%.gd'` (ASCII case-insensitive in `SQLite`).
+pub fn is_gdscript(path: &str) -> bool {
+    path.rsplit_once('.')
+        .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("gd"))
 }
 
+/// A call site: caller, file, line, column, and the method's bare name.
+type CallSite<'r> = (&'r str, &'r str, u32, u32, &'r str);
+
 /// Call sites where a `GDScript` typed ref resolved, keyed like the sibling
-/// refs and ambiguity records they make redundant: caller, file, line, and
-/// the method's bare name.
-fn gdscript_typed_sites(resolved: &[ResolvedRef]) -> HashSet<(&str, &str, u32, &str)> {
+/// refs and ambiguity records they make redundant. The column is part of the
+/// key: the typed ref and its sibling share the call node's position, while a
+/// different same-named call on the same line (`given.subscribe(subscribe(1))`)
+/// does not, and must keep its own edge or ambiguity record.
+fn gdscript_typed_sites(resolved: &[ResolvedRef]) -> HashSet<CallSite<'_>> {
     resolved
         .iter()
         .filter(|r| r.resolved_by == GDSCRIPT_TYPED)
@@ -235,6 +244,7 @@ fn gdscript_typed_sites(resolved: &[ResolvedRef]) -> HashSet<(&str, &str, u32, &
                 r.original.from_node_id.as_str(),
                 r.original.file_path.as_str(),
                 r.original.line,
+                r.original.column,
                 simple_ref_name(&r.original.reference_name),
             )
         })
@@ -265,6 +275,7 @@ fn suppress_gdscript_typed_siblings(resolved: &mut Vec<ResolvedRef>) {
                         r.original.from_node_id.as_str(),
                         r.original.file_path.as_str(),
                         r.original.line,
+                        r.original.column,
                         simple_ref_name(&r.original.reference_name),
                     ))
             })
@@ -785,6 +796,7 @@ impl<'a> ReferenceResolver<'a> {
                 a.from_node_id.as_str(),
                 a.file_path.as_str(),
                 a.line,
+                a.column,
                 simple_ref_name(&a.reference_name),
             ))
         });
@@ -1462,6 +1474,7 @@ impl<'a> ReferenceResolver<'a> {
             reference_name: uref.reference_name.clone(),
             file_path: uref.file_path.clone(),
             line: uref.line,
+            column: uref.column,
             // `find_best_matches` already orders by id, so the record is
             // stable across runs.
             candidate_node_ids: winners.into_iter().map(|n| n.id).collect(),

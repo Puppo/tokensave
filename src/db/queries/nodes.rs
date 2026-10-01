@@ -847,6 +847,7 @@ impl Database {
                 reference_name: get_string_lossy(&row, 1).unwrap_or_default(),
                 file_path: get_string_lossy(&row, 2).unwrap_or_default(),
                 line: row.get::<i64>(3).unwrap_or(0) as u32,
+                column: 0,
                 candidate_node_ids: serde_json::from_str(&encoded).unwrap_or_default(),
             });
         }

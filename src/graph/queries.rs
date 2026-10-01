@@ -352,9 +352,11 @@ impl<'a> GraphQueryManager<'a> {
 
         if dead
             .iter()
-            .any(|n| n.file_path.rsplit('.').next() == Some("gd"))
+            .any(|n| crate::resolution::is_gdscript(&n.file_path))
         {
-            let live = self.gdscript_live_overrides().await?;
+            // Best effort: a failed lookup leaves the overrides reported, and
+            // must not fail the whole dead-code query.
+            let live = self.gdscript_live_overrides().await.unwrap_or_default();
             if !live.is_empty() {
                 dead.retain(|n| !live.contains(&n.id));
             }

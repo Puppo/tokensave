@@ -145,7 +145,7 @@ impl TouchedSet {
         self.files.contains(file_path)
             || self.names.contains(reference_name)
             || self.names.contains(super::simple_ref_name(reference_name))
-            || (file_path.rsplit('.').next() == Some("gd")
+            || (super::is_gdscript(file_path)
                 && reference_name.contains("::")
                 && reference_name
                     .split("::")

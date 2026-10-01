@@ -674,11 +674,19 @@ impl TokenSave {
     /// records, against 189,446 inputs. The Go selector suppression runs once
     /// over the accumulated set, since nothing guarantees a selector and its
     /// bare-name sibling land in the same page.
+    ///
+    /// `incremental` narrows the pass to the references `touched` says this
+    /// sync could have changed; without it every reference is re-attempted.
     async fn resolve_all_streamed(
         &self,
         resolver: &ReferenceResolver<'_>,
-        touched: Option<&TouchedSet>,
+        touched: &TouchedSet,
+        incremental: bool,
     ) -> Result<StreamedResolution> {
+        let stale_sites = self
+            .clear_stale_gdscript_sites(touched, incremental)
+            .await?;
+        let touched = incremental.then_some(touched);
         let mut cursor = 0i64;
         let mut resolved: Vec<ResolvedRef> = Vec::new();
         let mut ambiguous: Vec<AmbiguousCall> = Vec::new();
@@ -702,7 +710,17 @@ impl TokenSave {
             // already in the table and their ambiguity records already written,
             // so re-deriving them produces byte-identical rows at full cost.
             if let Some(touched) = touched {
-                refs.retain(|uref| touched.needs_resolve(&uref.file_path, &uref.reference_name));
+                refs.retain(|uref| {
+                    touched.needs_resolve(&uref.file_path, &uref.reference_name)
+                        || (!stale_sites.is_empty()
+                            && uref.reference_kind == EdgeKind::Calls
+                            && stale_sites.contains(&(
+                                uref.from_node_id.clone(),
+                                uref.line,
+                                crate::resolution::simple_ref_name(&uref.reference_name)
+                                    .to_string(),
+                            )))
+                });
             }
             if refs.is_empty() {
                 continue;
@@ -729,6 +747,47 @@ impl TokenSave {
             attempted,
             attempted_refs,
         })
+    }
+
+    /// Clears the `calls` edges of `GDScript` typed-receiver call sites whose
+    /// answer this sync may have changed while their file stayed put, and
+    /// returns those sites (#597).
+    ///
+    /// A typed edge depends on declarations in other files: a member's
+    /// `: Type`, a method's `-> Type`, a class's `extends`. When one changes,
+    /// the touched set re-attempts the typed ref, but its caller's file was
+    /// not re-extracted, so the edge it wrote last time is still in the table
+    /// and would survive a re-attempt that no longer finds it. Edges carry no
+    /// column, so a site is (caller, line, bare callee name): every edge such
+    /// a site could have produced is deleted here, and the caller re-attempts
+    /// every reference at the site — the typed ref, its receiver-qualified
+    /// sibling, and any other same-named call on that line — so the table
+    /// ends up exactly as a full index would leave it.
+    ///
+    /// A file this sync re-extracted is skipped: re-extraction already
+    /// dropped its edges along with its nodes.
+    async fn clear_stale_gdscript_sites(
+        &self,
+        touched: &TouchedSet,
+        incremental: bool,
+    ) -> Result<HashSet<(String, u32, String)>> {
+        let sites: HashSet<(String, u32, String)> = self
+            .db
+            .get_gdscript_typed_refs()
+            .await?
+            .into_iter()
+            .filter(|uref| !touched.files().contains(&uref.file_path))
+            .filter(|uref| {
+                !incremental || touched.needs_resolve(&uref.file_path, &uref.reference_name)
+            })
+            .map(|uref| {
+                let name = crate::resolution::simple_ref_name(&uref.reference_name).to_string();
+                (uref.from_node_id, uref.line, name)
+            })
+            .collect();
+        let list: Vec<(String, u32, String)> = sites.iter().cloned().collect();
+        self.db.delete_call_edges_at_sites(&list).await?;
+        Ok(sites)
     }
 
     /// Writes the ambiguity records at the granularity this pass earns
@@ -966,7 +1025,7 @@ impl TokenSave {
             // references this sync could have changed (#484).
             let incremental = incremental_resolution_enabled();
             let resolution = self
-                .resolve_all_streamed(&resolver, incremental.then_some(&touched))
+                .resolve_all_streamed(&resolver, &touched, incremental)
                 .await?;
             let resolved_refs = &resolution.resolved;
             crate::memstats::record("sync:resolve:refs");
@@ -1358,7 +1417,7 @@ impl TokenSave {
                 // references this sync could have changed (#484).
                 let incremental = incremental_resolution_enabled();
                 let resolution = self
-                    .resolve_all_streamed(&resolver, incremental.then_some(&touched))
+                    .resolve_all_streamed(&resolver, &touched, incremental)
                     .await?;
                 attempted_refs = resolution.attempted;
                 debug_assert!(resolution.attempted <= resolution.total);

@@ -720,6 +720,7 @@ impl TokenSave {
             ambiguous.extend(batch_ambiguous);
         }
 
+        resolver.finalize_ambiguous(&resolved, &mut ambiguous);
         resolver.finalize_resolved(&mut resolved);
         Ok(StreamedResolution {
             resolved,

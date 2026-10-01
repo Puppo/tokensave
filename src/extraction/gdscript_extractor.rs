@@ -21,9 +21,11 @@
 //!   `Field` alongside plain `variable_statement`.
 //! - Local `var` inside a function body is never visited as a Field: the
 //!   member dispatcher only walks `source` (file root) and `class_body`
-//!   children; function bodies are only walked by `extract_call_sites`,
-//!   which looks solely for `call`/`attribute_call` nodes.
+//!   children; function bodies are only walked by `body_ctx` (which reads
+//!   local `var` types for receiver typing, #597) and `extract_call_sites`
+//!   (which records calls and methods used as values).
 
+use std::collections::{HashMap, HashSet};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Parser, Tree};
@@ -58,6 +60,31 @@ struct Scope {
     id: String,
 }
 
+/// What a function body can see of its enclosing script or inner class:
+/// the class's own name, its member variables' static types, and the names of
+/// its methods. Drives receiver typing (#597) and method-as-value refs (#598).
+#[derive(Default)]
+struct MemberCtx {
+    /// The class name a `self` receiver has, when the script declares one.
+    self_type: Option<String>,
+    /// Member variable -> type expression (see [`GdScriptExtractor::chain_type`]).
+    field_types: HashMap<String, String>,
+    /// Functions declared directly in this container.
+    methods: HashSet<String>,
+}
+
+/// Typing context of one function body.
+struct BodyCtx {
+    self_type: Option<String>,
+    /// Members, parameters and locals -> type expression. A parameter or local
+    /// without a static type is absent, so it cannot inherit a shadowed
+    /// member's type.
+    var_types: HashMap<String, String>,
+    /// Parameter and local names, which shadow members and methods.
+    locals: HashSet<String>,
+    methods: HashSet<String>,
+}
+
 /// Internal state used during AST traversal.
 struct ExtractionState {
     nodes: Vec<Node>,
@@ -65,6 +92,7 @@ struct ExtractionState {
     unresolved_refs: Vec<UnresolvedRef>,
     errors: Vec<String>,
     scope_stack: Vec<Scope>,
+    member_ctx: Vec<MemberCtx>,
     file_path: String,
     source: Vec<u8>,
     timestamp: u64,
@@ -82,6 +110,7 @@ impl ExtractionState {
             unresolved_refs: Vec::new(),
             errors: Vec::new(),
             scope_stack: Vec::new(),
+            member_ctx: Vec::new(),
             file_path: file_path.to_string(),
             source: source.as_bytes().to_vec(),
             timestamp,
@@ -258,7 +287,22 @@ impl GdScriptExtractor {
         };
         let attrs_start = class_name_node.map_or(0, |n| Self::attrs_start_line(n));
         let docstring = class_name_node.and_then(|n| Self::extract_docstring(&state, n));
-        let signature = class_name_node.map(|n| Self::first_line(&state, n));
+        // Extends target: embedded in `class_name Foo extends Bar`, or a
+        // standalone `extends Bar` statement (with or without `class_name`).
+        let embedded_extends = class_name_node.and_then(|cn| cn.child_by_field_name("extends"));
+        let extends_stmt =
+            embedded_extends.or_else(|| Self::find_child_by_kind(root, "extends_statement"));
+        let extends_target = extends_stmt.and_then(|es| Self::extends_text(&state, es));
+        // The signature carries the base even when `extends` is its own
+        // statement, so the resolver can walk the inheritance chain of a typed
+        // receiver from the node alone (#597).
+        let signature = class_name_node.map(|n| {
+            let line = Self::first_line(&state, n);
+            match (&extends_target, embedded_extends) {
+                (Some(base), None) => format!("{line} extends {base}"),
+                _ => line,
+            }
+        });
         let qn = state.member_qualified_name(&script_name);
 
         let script_id = state.add_node(
@@ -277,15 +321,8 @@ impl GdScriptExtractor {
             return Self::build_result(state, start);
         };
 
-        // Extends target: embedded in `class_name Foo extends Bar`, or a
-        // standalone `extends Bar` statement (with or without `class_name`).
-        let extends_stmt = class_name_node
-            .and_then(|cn| cn.child_by_field_name("extends"))
-            .or_else(|| Self::find_child_by_kind(root, "extends_statement"));
-        if let Some(es) = extends_stmt {
-            if let Some(target) = Self::extends_text(&state, es) {
-                Self::push_ref(&mut state, &script_id, &target, EdgeKind::Extends, es);
-            }
+        if let (Some(es), Some(target)) = (extends_stmt, extends_target) {
+            Self::push_ref(&mut state, &script_id, &target, EdgeKind::Extends, es);
         }
 
         state.scope_stack.push(Scope {
@@ -293,7 +330,11 @@ impl GdScriptExtractor {
             qual: qn,
             id: script_id,
         });
+        let self_type = class_name_node.is_some().then(|| script_name.clone());
+        let ctx = Self::collect_member_ctx(&state, root, self_type);
+        state.member_ctx.push(ctx);
         Self::visit_members(&mut state, root);
+        state.member_ctx.pop();
         state.scope_stack.pop(); // Script
         state.scope_stack.pop(); // File
 
@@ -386,7 +427,8 @@ impl GdScriptExtractor {
             }
         }
         if let Some(body) = body {
-            Self::extract_call_sites(state, body, &id);
+            let ctx = Self::body_ctx(state, node);
+            Self::extract_call_sites(state, body, &id, &ctx);
         }
     }
 
@@ -421,7 +463,8 @@ impl GdScriptExtractor {
             }
         }
         if let Some(body) = body {
-            Self::extract_call_sites(state, body, &id);
+            let ctx = Self::body_ctx(state, node);
+            Self::extract_call_sites(state, body, &id, &ctx);
         }
     }
 
@@ -632,9 +675,339 @@ impl GdScriptExtractor {
             id,
         });
         if let Some(body) = node.child_by_field_name("body") {
+            let ctx = Self::collect_member_ctx(state, body, Some(name));
+            state.member_ctx.push(ctx);
             Self::visit_members(state, body);
+            state.member_ctx.pop();
         }
         state.scope_stack.pop();
+    }
+
+    // ----------------------------
+    // Receiver typing (#597) and method-as-value references (#598)
+    // ----------------------------
+
+    /// The member variables' types and the method names of one container
+    /// (the file root or an inner `class_body`).
+    fn collect_member_ctx(
+        state: &ExtractionState,
+        container: TsNode<'_>,
+        self_type: Option<String>,
+    ) -> MemberCtx {
+        let mut ctx = MemberCtx {
+            self_type,
+            ..MemberCtx::default()
+        };
+        let mut cursor = container.walk();
+        if cursor.goto_first_child() {
+            loop {
+                let child = cursor.node();
+                match child.kind() {
+                    "variable_statement"
+                    | "export_variable_statement"
+                    | "onready_variable_statement" => {
+                        if let Some(name) = child.child_by_field_name("name") {
+                            let name = state.node_text(name);
+                            let ty = Self::declared_type(
+                                state,
+                                child,
+                                &ctx.field_types,
+                                &HashSet::new(),
+                                ctx.self_type.as_deref(),
+                            );
+                            if let Some(ty) = ty {
+                                ctx.field_types.insert(name, ty);
+                            }
+                        }
+                    }
+                    "function_definition" => {
+                        if let Some(name) = child.child_by_field_name("name") {
+                            ctx.methods.insert(state.node_text(name));
+                        }
+                    }
+                    _ => {}
+                }
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
+            }
+        }
+        ctx
+    }
+
+    /// The typing context of a function: the container's members, then its
+    /// parameters and locals (which shadow them).
+    fn body_ctx(state: &ExtractionState, func: TsNode<'_>) -> BodyCtx {
+        let (self_type, mut var_types, methods) = match state.member_ctx.last() {
+            Some(m) => (
+                m.self_type.clone(),
+                m.field_types.clone(),
+                m.methods.clone(),
+            ),
+            None => (None, HashMap::new(), HashSet::new()),
+        };
+        let mut locals = HashSet::new();
+        if let Some(params) = func.child_by_field_name("parameters") {
+            Self::collect_params(
+                state,
+                params,
+                &mut var_types,
+                &mut locals,
+                self_type.as_deref(),
+            );
+        }
+        if let Some(body) = func.child_by_field_name("body") {
+            Self::collect_locals(
+                state,
+                body,
+                &mut var_types,
+                &mut locals,
+                self_type.as_deref(),
+            );
+        }
+        BodyCtx {
+            self_type,
+            var_types,
+            locals,
+            methods,
+        }
+    }
+
+    /// Records each parameter as a local, with its type when it has one:
+    /// `p: T`, `p: T = v`, or `p := v` (inferred from `v`).
+    fn collect_params(
+        state: &ExtractionState,
+        params: TsNode<'_>,
+        var_types: &mut HashMap<String, String>,
+        locals: &mut HashSet<String>,
+        self_type: Option<&str>,
+    ) {
+        let mut cursor = params.walk();
+        if !cursor.goto_first_child() {
+            return;
+        }
+        loop {
+            let p = cursor.node();
+            let ident = if p.kind() == "identifier" {
+                Some(p)
+            } else {
+                Self::find_child_by_kind(p, "identifier")
+            };
+            if let Some(ident) = ident.filter(|_| p.is_named()) {
+                let name = state.node_text(ident);
+                let ty = Self::declared_type(state, p, var_types, locals, self_type);
+                locals.insert(name.clone());
+                match ty {
+                    Some(ty) => var_types.insert(name, ty),
+                    None => var_types.remove(&name),
+                };
+            }
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+    }
+
+    /// Records every `var` in a body (and the parameters of its lambdas) in
+    /// source order. Flow-insensitive, like the other extractors' receiver
+    /// tables: a name keeps the last type declared for it.
+    fn collect_locals(
+        state: &ExtractionState,
+        node: TsNode<'_>,
+        var_types: &mut HashMap<String, String>,
+        locals: &mut HashSet<String>,
+        self_type: Option<&str>,
+    ) {
+        let mut cursor = node.walk();
+        if !cursor.goto_first_child() {
+            return;
+        }
+        loop {
+            let c = cursor.node();
+            match c.kind() {
+                "variable_statement" => {
+                    if let Some(name) = c.child_by_field_name("name") {
+                        let name = state.node_text(name);
+                        let ty = Self::declared_type(state, c, var_types, locals, self_type);
+                        locals.insert(name.clone());
+                        match ty {
+                            Some(ty) => var_types.insert(name, ty),
+                            None => var_types.remove(&name),
+                        };
+                    }
+                }
+                "lambda" => {
+                    if let Some(params) = c.child_by_field_name("parameters") {
+                        Self::collect_params(state, params, var_types, locals, self_type);
+                    }
+                }
+                _ => {}
+            }
+            Self::collect_locals(state, c, var_types, locals, self_type);
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+    }
+
+    /// The static type of a declaration (`var`, member or parameter): its
+    /// annotation when it is a plain class name, or for `:=` the type of the
+    /// initializer. An untyped declaration is a `Variant` and yields `None`.
+    fn declared_type(
+        state: &ExtractionState,
+        decl: TsNode<'_>,
+        var_types: &HashMap<String, String>,
+        locals: &HashSet<String>,
+        self_type: Option<&str>,
+    ) -> Option<String> {
+        let ty = decl.child_by_field_name("type")?;
+        match ty.kind() {
+            "type" => Self::simple_type_name(&state.node_text(ty)),
+            "inferred_type" => {
+                let value = decl.child_by_field_name("value")?;
+                Self::expr_type(state, value, var_types, locals, self_type)
+            }
+            _ => None,
+        }
+    }
+
+    /// A type annotation usable as a class lookup: one identifier. Generic
+    /// containers (`Array[Bus]`) and dotted inner-class paths are left alone.
+    fn simple_type_name(text: &str) -> Option<String> {
+        let text = text.trim();
+        let mut chars = text.chars();
+        let first = chars.next()?;
+        (first.is_alphabetic() || first == '_')
+            .then_some(())
+            .filter(|()| chars.all(|c| c.is_alphanumeric() || c == '_'))
+            .map(|()| text.to_string())
+    }
+
+    /// The type expression of an initializer: a typed variable, a class name,
+    /// or a chain through one (`Bus.make()`, `Bus.new()`, `a.b.c()`).
+    fn expr_type(
+        state: &ExtractionState,
+        expr: TsNode<'_>,
+        var_types: &HashMap<String, String>,
+        locals: &HashSet<String>,
+        self_type: Option<&str>,
+    ) -> Option<String> {
+        match expr.kind() {
+            "identifier" => Self::ident_type(&state.node_text(expr), var_types, locals, self_type),
+            "attribute" => {
+                let parts = Self::named_children(expr);
+                Self::chain_type(state, &parts, var_types, locals, self_type)
+            }
+            _ => None,
+        }
+    }
+
+    /// The type expression an identifier names: `self`, a typed variable, or
+    /// — when it is not a local and reads as a class (`CapWords`) — the class
+    /// itself, for a static call or `.new()`.
+    fn ident_type(
+        name: &str,
+        var_types: &HashMap<String, String>,
+        locals: &HashSet<String>,
+        self_type: Option<&str>,
+    ) -> Option<String> {
+        if name == "self" {
+            return self_type.map(str::to_string);
+        }
+        if let Some(ty) = var_types.get(name) {
+            return Some(ty.clone());
+        }
+        let looks_like_class = name.chars().next().is_some_and(char::is_uppercase);
+        (looks_like_class && !locals.contains(name)).then(|| name.to_string())
+    }
+
+    /// The type expression of the chain `parts` (the children of an
+    /// `attribute` node up to some point).
+    ///
+    /// A type expression is a class name followed by `::`-separated member
+    /// steps the resolver evaluates against the indexed classes: `field` reads
+    /// a member variable's declared type, `method()` a method's declared return
+    /// type. `Bus::again()` is "the return type of `Bus.again`". The extractor
+    /// cannot evaluate those steps itself because the members usually live in
+    /// another file. `.new()` keeps the type and adds no step.
+    fn chain_type(
+        state: &ExtractionState,
+        parts: &[TsNode<'_>],
+        var_types: &HashMap<String, String>,
+        locals: &HashSet<String>,
+        self_type: Option<&str>,
+    ) -> Option<String> {
+        let (root, steps) = parts.split_first()?;
+        if root.kind() != "identifier" {
+            return None;
+        }
+        let mut expr = Self::ident_type(&state.node_text(*root), var_types, locals, self_type)?;
+        for step in steps {
+            match step.kind() {
+                "identifier" => {
+                    expr.push_str("::");
+                    expr.push_str(&state.node_text(*step));
+                }
+                "attribute_call" => {
+                    let method = Self::find_child_by_kind(*step, "identifier")
+                        .map(|n| state.node_text(n))?;
+                    if method != "new" {
+                        expr.push_str("::");
+                        expr.push_str(&method);
+                        expr.push_str("()");
+                    }
+                }
+                _ => return None,
+            }
+        }
+        Some(expr)
+    }
+
+    fn named_children(node: TsNode<'_>) -> Vec<TsNode<'_>> {
+        let mut cursor = node.walk();
+        node.named_children(&mut cursor).collect()
+    }
+
+    /// For `recv.method()` whose receiver has a static type, the typed
+    /// reference `Type::method` (or `Type::step()::method` through a chain).
+    /// It is recorded beside the receiver-qualified `recv.method` ref at the
+    /// same position, which still covers untyped receivers.
+    fn typed_call_ref(state: &ExtractionState, call: TsNode<'_>, ctx: &BodyCtx) -> Option<String> {
+        let parent = call.parent().filter(|p| p.kind() == "attribute")?;
+        let parts = Self::named_children(parent);
+        let index = parts.iter().position(|p| p.id() == call.id())?;
+        let method = Self::find_child_by_kind(call, "identifier").map(|n| state.node_text(n))?;
+        if index == 0 || method == "new" {
+            return None;
+        }
+        let receiver = Self::chain_type(
+            state,
+            &parts[..index],
+            &ctx.var_types,
+            &ctx.locals,
+            ctx.self_type.as_deref(),
+        )?;
+        Some(format!("{receiver}::{method}"))
+    }
+
+    /// True when `ident` sits where a value goes — a call argument, an array
+    /// element, a dictionary value, the right side of an assignment, a `var`
+    /// initializer or a `return` — rather than being called or assigned to.
+    fn is_value_position(ident: TsNode<'_>) -> bool {
+        let Some(parent) = ident.parent() else {
+            return false;
+        };
+        let is_field = |field: &str| {
+            parent
+                .child_by_field_name(field)
+                .is_some_and(|n| n.id() == ident.id())
+        };
+        match parent.kind() {
+            "arguments" | "array" | "return_statement" => true,
+            "pair" | "variable_statement" => is_field("value"),
+            "assignment" | "augmented_assignment" => is_field("right"),
+            _ => false,
+        }
     }
 
     // ----------------------------
@@ -781,7 +1154,21 @@ impl GdScriptExtractor {
     /// Both were previously invisible to this extractor: a callee referenced
     /// only this way had zero recorded edges, making `tokensave_dead_code`
     /// misreport it as unreachable even though it's genuinely live.
-    fn extract_call_sites(state: &mut ExtractionState, node: TsNode<'_>, fn_id: &str) {
+    ///
+    /// Two more come from the body's typing context (`ctx`):
+    /// - a call on a statically typed receiver also records the typed
+    ///   reference `Type::method` (see `typed_call_ref`), which the resolver
+    ///   evaluates against the receiver's class instead of the bare method
+    ///   name, so a same-named method on another class cannot tie it (#597);
+    /// - a method of the enclosing class used as a value — passed, assigned,
+    ///   stored in an array or returned, not called — records a `Uses`
+    ///   reference to it (#598).
+    fn extract_call_sites(
+        state: &mut ExtractionState,
+        node: TsNode<'_>,
+        fn_id: &str,
+        ctx: &BodyCtx,
+    ) {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
             loop {
@@ -798,6 +1185,18 @@ impl GdScriptExtractor {
                                 file_path: state.file_path.clone(),
                             });
                         }
+                        if child.kind() == "attribute_call" {
+                            if let Some(typed) = Self::typed_call_ref(state, child, ctx) {
+                                state.unresolved_refs.push(UnresolvedRef {
+                                    from_node_id: fn_id.to_string(),
+                                    reference_name: typed,
+                                    reference_kind: EdgeKind::Calls,
+                                    line: child.start_position().row as u32,
+                                    column: child.start_position().column as u32,
+                                    file_path: state.file_path.clone(),
+                                });
+                            }
+                        }
                         for target in Self::dynamic_dispatch_targets(state, child) {
                             state.unresolved_refs.push(UnresolvedRef {
                                 from_node_id: fn_id.to_string(),
@@ -812,9 +1211,25 @@ impl GdScriptExtractor {
                     "arguments" => {
                         Self::extract_bare_attribute_args(state, child, fn_id);
                     }
+                    "identifier" => {
+                        let name = state.node_text(child);
+                        if ctx.methods.contains(&name)
+                            && !ctx.locals.contains(&name)
+                            && Self::is_value_position(child)
+                        {
+                            state.unresolved_refs.push(UnresolvedRef {
+                                from_node_id: fn_id.to_string(),
+                                reference_name: name,
+                                reference_kind: EdgeKind::Uses,
+                                line: child.start_position().row as u32,
+                                column: child.start_position().column as u32,
+                                file_path: state.file_path.clone(),
+                            });
+                        }
+                    }
                     _ => {}
                 }
-                Self::extract_call_sites(state, child, fn_id);
+                Self::extract_call_sites(state, child, fn_id, ctx);
                 if !cursor.goto_next_sibling() {
                     break;
                 }

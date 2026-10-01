@@ -213,6 +213,138 @@ fn suppress_go_selector_bare_siblings(resolved: &mut Vec<ResolvedRef>) {
     });
 }
 
+/// `resolved_by` tag of a `GDScript` call resolved through its receiver's type.
+const GDSCRIPT_TYPED: &str = "gdscript-typed-receiver";
+
+/// `GDScript` is deliberately absent from [`lang_from_path`]: a `.gd` call into
+/// a godot-cpp method (#269) relies on the cross-language confidence that an
+/// unknown language gets, so the tag would drop those edges.
+///
+/// Case-insensitive, to agree with the SQL side, which selects `.gd` rows with
+/// `LIKE '%.gd'` (ASCII case-insensitive in `SQLite`).
+pub fn is_gdscript(path: &str) -> bool {
+    path.rsplit_once('.')
+        .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("gd"))
+}
+
+/// A call site: caller, file, line, column, and the method's bare name.
+type CallSite<'r> = (&'r str, &'r str, u32, u32, &'r str);
+
+/// Call sites where a `GDScript` typed ref resolved, keyed like the sibling
+/// refs and ambiguity records they make redundant. The column is part of the
+/// key: the typed ref and its sibling share the call node's position, while a
+/// different same-named call on the same line (`given.subscribe(subscribe(1))`)
+/// does not, and must keep its own edge or ambiguity record.
+fn gdscript_typed_sites(resolved: &[ResolvedRef]) -> HashSet<CallSite<'_>> {
+    resolved
+        .iter()
+        .filter(|r| r.resolved_by == GDSCRIPT_TYPED)
+        .map(|r| {
+            (
+                r.original.from_node_id.as_str(),
+                r.original.file_path.as_str(),
+                r.original.line,
+                r.original.column,
+                simple_ref_name(&r.original.reference_name),
+            )
+        })
+        .collect()
+}
+
+/// Drops the receiver-qualified sibling of a `GDScript` call whose typed ref
+/// resolved (#597).
+///
+/// The extractor records both `recv.method` and `Type::method` for a typed
+/// receiver. Once the typed one resolves, the name-based sibling can only
+/// agree with it (the same edge, collapsed by the unique index) or disagree
+/// by binding a same-named method the receiver's type does not have — for
+/// instance one in the caller's own file, which scoring favours. Either way
+/// the typed answer is the one to keep.
+fn suppress_gdscript_typed_siblings(resolved: &mut Vec<ResolvedRef>) {
+    let keep: Vec<bool> = {
+        let sites = gdscript_typed_sites(resolved);
+        if sites.is_empty() {
+            return;
+        }
+        resolved
+            .iter()
+            .map(|r| {
+                r.resolved_by == GDSCRIPT_TYPED
+                    || r.original.reference_kind != EdgeKind::Calls
+                    || !sites.contains(&(
+                        r.original.from_node_id.as_str(),
+                        r.original.file_path.as_str(),
+                        r.original.line,
+                        r.original.column,
+                        simple_ref_name(&r.original.reference_name),
+                    ))
+            })
+            .collect()
+    };
+    let mut idx = 0;
+    resolved.retain(|_| {
+        let k = keep[idx];
+        idx += 1;
+        k
+    });
+}
+
+/// The class a `GDScript` declaration names after `extends`, when it is a class
+/// name rather than a `"res://..."` path. Read from the class node's
+/// signature, which the extractor writes as `class_name X extends Y` or
+/// `class X extends Y:`.
+fn gdscript_extends(signature: &str) -> Option<&str> {
+    let (_, rest) = signature.split_once(" extends ")?;
+    let base = rest
+        .trim()
+        .split(|c: char| c.is_whitespace() || c == ':')
+        .next()?;
+    is_gdscript_ident(base).then_some(base)
+}
+
+/// The declared return type of a `GDScript` function signature
+/// (`func f(...) -> T`), when it is a class name. `void` has no members.
+fn gdscript_return_type(signature: &str) -> Option<&str> {
+    let (_, ty) = signature.rsplit_once("->")?;
+    let ty = ty.trim().trim_end_matches(':').trim();
+    (is_gdscript_ident(ty) && ty != "void").then_some(ty)
+}
+
+/// The declared type of a `GDScript` member variable signature
+/// (`[@annotation] var name: T [= v]`), when it is a class name. `:=` infers
+/// the type from the initializer, which the signature line does not type.
+fn gdscript_field_type(signature: &str) -> Option<&str> {
+    let (_, rest) = signature.split_once("var ")?;
+    let rest = rest.trim_start();
+    let after_name = rest.trim_start_matches(|c: char| c.is_alphanumeric() || c == '_');
+    let after_colon = after_name.trim_start().strip_prefix(':')?;
+    if after_colon.starts_with('=') {
+        return None;
+    }
+    let after_colon = after_colon.trim_start();
+    let end = after_colon
+        .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .unwrap_or(after_colon.len());
+    let (ty, rest) = after_colon.split_at(end);
+    // `Array[T]` and `Outer.Inner` are not a plain class lookup.
+    let plain = !rest.starts_with('[') && !rest.starts_with('.');
+    (plain && is_gdscript_ident(ty)).then_some(ty)
+}
+
+fn is_gdscript_ident(s: &str) -> bool {
+    let mut chars = s.chars();
+    chars.next().is_some_and(|c| c.is_alphabetic() || c == '_')
+        && chars.all(|c| c.is_alphanumeric() || c == '_')
+}
+
+/// Callable node kinds a `GDScript` method lookup accepts.
+fn is_gdscript_callable(kind: &NodeKind) -> bool {
+    matches!(
+        kind,
+        NodeKind::Function | NodeKind::Method | NodeKind::Constructor
+    )
+}
+
 /// Infer a coarse language tag from a file path extension.
 fn lang_from_path(path: &str) -> &'static str {
     match path.rsplit('.').next().unwrap_or("") {
@@ -502,6 +634,17 @@ impl<'a> ReferenceResolver<'a> {
             }
         }
 
+        // GDScript typed-receiver calls (#597) carry the receiver's static
+        // type, so they resolve through that class or not at all. The
+        // receiver-qualified `recv.method` ref the extractor records at the
+        // same site keeps today's name-based behaviour for everything else.
+        if uref.reference_kind == EdgeKind::Calls
+            && is_gdscript(&uref.file_path)
+            && uref.reference_name.contains("::")
+        {
+            return self.try_gdscript_typed_match(uref);
+        }
+
         // Ruby receiver-qualified calls use only positive receiver and
         // singleton-definition evidence. Unsupported or ambiguous shapes stay
         // unresolved instead of falling back to the trailing method name.
@@ -593,7 +736,8 @@ impl<'a> ReferenceResolver<'a> {
     /// turning hopeless lookups into O(1) hash checks.
     pub fn resolve_all(&self, refs: &[UnresolvedRef]) -> ResolutionResult {
         let total = refs.len();
-        let (mut resolved, ambiguous, unresolved) = self.resolve_batch_inner(refs);
+        let (mut resolved, mut ambiguous, unresolved) = self.resolve_batch_inner(refs);
+        self.finalize_ambiguous(&resolved, &mut ambiguous);
         self.finalize_resolved(&mut resolved);
         let resolved_count = resolved.len();
         ResolutionResult {
@@ -632,6 +776,30 @@ impl<'a> ReferenceResolver<'a> {
     /// the accumulated set.
     pub fn finalize_resolved(&self, resolved: &mut Vec<ResolvedRef>) {
         suppress_go_selector_bare_siblings(resolved);
+        suppress_gdscript_typed_siblings(resolved);
+    }
+
+    /// The ambiguity half of [`Self::finalize_resolved`], run once over the
+    /// accumulated results for the same reason.
+    ///
+    /// A `GDScript` call whose typed ref resolved is not ambiguous, even though
+    /// its receiver-qualified sibling tied on the bare method name (#597).
+    /// Left in, the record would list the losing same-named methods as
+    /// candidates, and `dead_code` treats an ambiguity candidate as referenced.
+    pub fn finalize_ambiguous(&self, resolved: &[ResolvedRef], ambiguous: &mut Vec<AmbiguousCall>) {
+        let sites = gdscript_typed_sites(resolved);
+        if sites.is_empty() {
+            return;
+        }
+        ambiguous.retain(|a| {
+            !sites.contains(&(
+                a.from_node_id.as_str(),
+                a.file_path.as_str(),
+                a.line,
+                a.column,
+                simple_ref_name(&a.reference_name),
+            ))
+        });
     }
 
     /// Resolve `refs`, returning the resolved edges, the ambiguity records, and
@@ -862,6 +1030,87 @@ impl<'a> ReferenceResolver<'a> {
             confidence: 0.95,
             resolved_by: resolved_by.to_string(),
         })
+    }
+
+    /// Resolve a `GDScript` typed-receiver call `Type[::step]*::method` (#597).
+    ///
+    /// The extractor writes the receiver's static type as a class name plus
+    /// the member steps it went through: `field` reads a member variable's
+    /// declared type, `method()` a method's declared return type. Each is
+    /// evaluated here against the indexed classes — `class_name` makes every
+    /// script class global, so a class is found by name alone — and a member
+    /// missing from a class is looked up through its `extends` chain.
+    ///
+    /// Returns `None` whenever the evidence runs out: an engine or unindexed
+    /// class, an untyped step, a method the class does not have. The
+    /// receiver-qualified sibling ref then decides, as it did before.
+    fn try_gdscript_typed_match(&self, uref: &UnresolvedRef) -> Option<ResolvedRef> {
+        let mut segments = uref.reference_name.split("::");
+        let root = segments.next()?;
+        let mut steps: Vec<&str> = segments.collect();
+        let method = steps.pop()?;
+
+        let mut class = self.gdscript_class(root)?;
+        for step in steps {
+            let ty = if let Some(name) = step.strip_suffix("()") {
+                let callee = self.gdscript_member(class, name, is_gdscript_callable)?;
+                gdscript_return_type(callee.signature.as_deref()?)?
+            } else {
+                let field = self.gdscript_member(class, step, |k| *k == NodeKind::Field)?;
+                gdscript_field_type(field.signature.as_deref()?)?
+            };
+            class = self.gdscript_class(ty)?;
+        }
+
+        let target = self.gdscript_member(class, method, is_gdscript_callable)?;
+        Some(ResolvedRef {
+            original: uref.clone(),
+            target_node_id: target.id.clone(),
+            confidence: 0.95,
+            resolved_by: GDSCRIPT_TYPED.to_string(),
+        })
+    }
+
+    /// The one `GDScript` class named `name`: a `class_name` script class, or
+    /// failing that an inner class. Several of either is no evidence.
+    fn gdscript_class(&self, name: &str) -> Option<&'a Node> {
+        let candidates = self.name_cache.get(name)?;
+        let unique = |kind: NodeKind| {
+            let mut it = candidates
+                .iter()
+                .copied()
+                .filter(|n| n.kind == kind && is_gdscript(&n.file_path));
+            let first = it.next()?;
+            it.next().is_none().then_some(first)
+        };
+        unique(NodeKind::Class).or_else(|| unique(NodeKind::InnerClass))
+    }
+
+    /// The member `name` of `class`, declared there or inherited through its
+    /// `extends` chain.
+    fn gdscript_member(
+        &self,
+        class: &'a Node,
+        name: &str,
+        kind_ok: impl Fn(&NodeKind) -> bool,
+    ) -> Option<&'a Node> {
+        // Bounded so an `extends` cycle (which Godot rejects, but an index of
+        // a broken tree can hold) cannot loop.
+        const MAX_DEPTH: usize = 32;
+        let mut class = class;
+        for _ in 0..MAX_DEPTH {
+            let qn = format!("{}.{name}", class.qualified_name);
+            if let Some(found) = self
+                .qualified_name_cache
+                .get(qn.as_str())
+                .and_then(|nodes| nodes.iter().copied().find(|n| kind_ok(&n.kind)))
+            {
+                return Some(found);
+            }
+            let base = gdscript_extends(class.signature.as_deref()?)?;
+            class = self.gdscript_class(base)?;
+        }
+        None
     }
 
     fn ruby_constant_owners_at(&self, constant_path: &str) -> Option<Vec<&Node>> {
@@ -1202,6 +1451,11 @@ impl<'a> ReferenceResolver<'a> {
         if uref.reference_kind != EdgeKind::Calls {
             return None;
         }
+        // A GDScript typed ref that did not resolve is not a name tie: its
+        // receiver-qualified sibling at the same site explains any tie (#597).
+        if is_gdscript(&uref.file_path) && uref.reference_name.contains("::") {
+            return None;
+        }
         let simple_name = simple_ref_name(&uref.reference_name);
         let raw = self.name_cache.get(simple_name)?;
         let candidates: Vec<&Node> = raw
@@ -1220,6 +1474,7 @@ impl<'a> ReferenceResolver<'a> {
             reference_name: uref.reference_name.clone(),
             file_path: uref.file_path.clone(),
             line: uref.line,
+            column: uref.column,
             // `find_best_matches` already orders by id, so the record is
             // stable across runs.
             candidate_node_ids: winners.into_iter().map(|n| n.id).collect(),

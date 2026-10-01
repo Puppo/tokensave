@@ -847,6 +847,7 @@ impl Database {
                 reference_name: get_string_lossy(&row, 1).unwrap_or_default(),
                 file_path: get_string_lossy(&row, 2).unwrap_or_default(),
                 line: row.get::<i64>(3).unwrap_or(0) as u32,
+                column: 0,
                 candidate_node_ids: serde_json::from_str(&encoded).unwrap_or_default(),
             });
         }
@@ -974,13 +975,23 @@ impl Database {
     /// actually needed — `tests/resolution_slim_nodes_test.rs` asserts the two
     /// loads resolve identically, so a future resolver change that starts
     /// reading either field fails loudly instead of silently seeing `None`.
+    ///
+    /// One exception: `GDScript` classes, functions and fields keep their
+    /// signature. The resolver reads a receiver's static type through them —
+    /// the `extends` base of a class, the `-> Type` of a method, the `: Type` of
+    /// a field (#597). The extractor stores one declaration line there (a
+    /// function's up to its body), so the column is bounded for these rows.
     pub async fn get_all_nodes_for_resolution(&self) -> Result<Vec<Node>> {
         let mut rows = self
             .conn()
             .query(
                 "SELECT id, kind, name, qualified_name, file_path,
                     start_line, end_line, start_column, end_column,
-                    NULL AS docstring, NULL AS signature, visibility, is_async, branches, loops, returns, max_nesting, unsafe_blocks, unchecked_calls, assertions, updated_at, attrs_start_line, parent_id, cognitive_complexity, distinct_operators, distinct_operands, total_operators, total_operands
+                    NULL AS docstring,
+                    CASE WHEN file_path LIKE '%.gd'
+                              AND kind IN ('class', 'inner_class', 'function', 'method', 'field')
+                         THEN signature END AS signature,
+                    visibility, is_async, branches, loops, returns, max_nesting, unsafe_blocks, unchecked_calls, assertions, updated_at, attrs_start_line, parent_id, cognitive_complexity, distinct_operators, distinct_operands, total_operators, total_operands
                  FROM nodes",
                 (),
             )

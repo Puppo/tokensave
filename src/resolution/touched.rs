@@ -137,10 +137,19 @@ impl TouchedSet {
     /// The name test mirrors the resolver's own pre-filter — literal name, then
     /// trailing simple name — because a qualified ref such as `Self::method`
     /// reaches its candidates through the simple name, not verbatim (#141).
+    ///
+    /// A `GDScript` typed-receiver ref (`Bus::again()::subscribe`, #597) also
+    /// depends on every class and member it steps through, so any of its
+    /// segments being touched re-attempts it.
     pub fn needs_resolve(&self, file_path: &str, reference_name: &str) -> bool {
         self.files.contains(file_path)
             || self.names.contains(reference_name)
             || self.names.contains(super::simple_ref_name(reference_name))
+            || (super::is_gdscript(file_path)
+                && reference_name.contains("::")
+                && reference_name
+                    .split("::")
+                    .any(|seg| self.names.contains(seg.trim_end_matches("()"))))
     }
 
     /// The files whose references were re-extracted this sync.

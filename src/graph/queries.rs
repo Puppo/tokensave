@@ -349,7 +349,69 @@ impl<'a> GraphQueryManager<'a> {
             let node = row_to_node_dead_code(&row)?;
             dead.push(node);
         }
+
+        if dead
+            .iter()
+            .any(|n| crate::resolution::is_gdscript(&n.file_path))
+        {
+            // Best effort: a failed lookup leaves the overrides reported, and
+            // must not fail the whole dead-code query.
+            let live = self.gdscript_live_overrides().await.unwrap_or_default();
+            if !live.is_empty() {
+                dead.retain(|n| !live.contains(&n.id));
+            }
+        }
         Ok(dead)
+    }
+
+    /// `GDScript` methods that override a base-class method which is called or
+    /// used (#598).
+    ///
+    /// A base class calling `_fields()` on `self` resolves to the base
+    /// declaration, yet for a subclass instance it is the override that runs.
+    /// The override has no edge of its own, and adding a synthetic one would
+    /// make `callers`/`callees` claim a call the source does not make, so the
+    /// override is exempted here instead. Inheritance comes from resolved
+    /// `extends` edges, followed transitively, so a grandchild override of a
+    /// called method is live too; an override of a base method nothing
+    /// reaches stays dead, like the base method itself.
+    async fn gdscript_live_overrides(&self) -> Result<HashSet<String>> {
+        let sql = "WITH RECURSIVE ancestry(cls, base) AS (
+                 SELECT e.source, e.target FROM edges e
+                 WHERE e.kind = 'extends'
+                   AND e.source IN (SELECT id FROM nodes
+                                    WHERE file_path LIKE '%.gd'
+                                      AND kind IN ('class', 'inner_class'))
+                 UNION
+                 SELECT a.cls, e.target FROM ancestry a
+                 JOIN edges e ON e.source = a.base AND e.kind = 'extends'
+             )
+             SELECT DISTINCT m.id FROM ancestry a
+             JOIN nodes m ON m.parent_id = a.cls AND m.kind IN ('function', 'method')
+             JOIN nodes b ON b.parent_id = a.base AND b.name = m.name
+                         AND b.kind IN ('function', 'method')
+             WHERE EXISTS (SELECT 1 FROM edges c
+                           WHERE c.target = b.id AND c.kind IN ('calls', 'uses'))";
+        let mut rows =
+            self.db
+                .conn()
+                .query(sql, ())
+                .await
+                .map_err(|e| TokenSaveError::Database {
+                    message: format!("failed to find live GDScript overrides: {e}"),
+                    operation: "gdscript_live_overrides".to_string(),
+                })?;
+        let mut live = HashSet::new();
+        while let Some(row) = rows.next().await.map_err(|e| TokenSaveError::Database {
+            message: format!("failed to read row: {e}"),
+            operation: "gdscript_live_overrides".to_string(),
+        })? {
+            live.insert(row.get::<String>(0).map_err(|e| TokenSaveError::Database {
+                message: format!("failed to read override id: {e}"),
+                operation: "gdscript_live_overrides".to_string(),
+            })?);
+        }
+        Ok(live)
     }
 
     /// Computes metrics for a single node describing its graph connectivity.

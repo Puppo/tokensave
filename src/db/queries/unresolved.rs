@@ -6,6 +6,40 @@ use super::*;
 // ---------------------------------------------------------------------------
 
 impl Database {
+    /// The `GDScript` typed-receiver call refs (`Bus::again()::subscribe`,
+    /// #597): `calls` refs from `.gd` files whose name holds a `::` type
+    /// expression. A small slice of the table, read before an incremental
+    /// resolution to find the call sites whose existing edges may be stale.
+    pub async fn get_gdscript_typed_refs(&self) -> Result<Vec<UnresolvedRef>> {
+        let mut rows = self
+            .conn()
+            .query(
+                "SELECT from_node_id, reference_name, line, col, file_path
+                 FROM unresolved_refs
+                 WHERE reference_kind = 'calls'
+                   AND file_path LIKE '%.gd'
+                   AND instr(reference_name, '::') > 0",
+                (),
+            )
+            .await
+            .map_err(|e| TokenSaveError::Database {
+                message: format!("failed to query GDScript typed refs: {e}"),
+                operation: "get_gdscript_typed_refs".to_string(),
+            })?;
+        let mut out = Vec::new();
+        while let Ok(Some(row)) = rows.next().await {
+            out.push(UnresolvedRef {
+                from_node_id: row.get::<String>(0).unwrap_or_default(),
+                reference_name: row.get::<String>(1).unwrap_or_default(),
+                reference_kind: EdgeKind::Calls,
+                line: row.get::<u32>(2).unwrap_or(0),
+                column: row.get::<u32>(3).unwrap_or(0),
+                file_path: row.get::<String>(4).unwrap_or_default(),
+            });
+        }
+        Ok(out)
+    }
+
     /// Inserts a single unresolved reference.
     pub async fn insert_unresolved_ref(&self, uref: &UnresolvedRef) -> Result<()> {
         self.conn()

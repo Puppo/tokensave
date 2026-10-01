@@ -1784,4 +1784,28 @@ impl Database {
             })?;
         Ok(())
     }
+
+    /// Deletes the `calls` edges that call sites may have produced, each site
+    /// given as (caller id, line, callee bare name), so a re-resolution of
+    /// every reference at those sites can write them afresh (#597).
+    pub async fn delete_call_edges_at_sites(&self, sites: &[(String, u32, String)]) -> Result<()> {
+        if sites.is_empty() {
+            return Ok(());
+        }
+        for (source, line, name) in sites {
+            self.conn()
+                .execute(
+                    "DELETE FROM edges
+                     WHERE kind = 'calls' AND source = ?1 AND line = ?2
+                       AND target IN (SELECT id FROM nodes WHERE name = ?3)",
+                    params![source.as_str(), i64::from(*line), name.as_str()],
+                )
+                .await
+                .map_err(|e| TokenSaveError::Database {
+                    message: format!("failed to delete call edges at a site: {e}"),
+                    operation: "delete_call_edges_at_sites".to_string(),
+                })?;
+        }
+        Ok(())
+    }
 }

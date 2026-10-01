@@ -5991,8 +5991,17 @@ async fn mcp_server_owns_watcher_and_refreshes_token_map_on_change() {
     // growing is the observable outcome regardless of which sync won.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     let after_count = loop {
-        let stale = server.cg().find_stale_files().await;
-        server.cg().sync_if_stale_silent(&stale).await.unwrap();
+        let stale = server
+            .cg()
+            .expect("default project")
+            .find_stale_files()
+            .await;
+        server
+            .cg()
+            .expect("default project")
+            .sync_if_stale_silent(&stale)
+            .await
+            .unwrap();
         server.refresh_file_token_map().await;
         let count = server.file_token_map_snapshot().len();
         if count > initial_count || std::time::Instant::now() >= deadline {

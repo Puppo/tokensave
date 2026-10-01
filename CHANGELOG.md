@@ -7,6 +7,8 @@ and this project uses [maintenance-based versioning](TOKENSAVE-VERSIONING.md), n
 
 ## [Unreleased]
 
+### Fixed
+- **`serve` starts with no default project when none resolves, instead of exiting (#606).** Outside every indexed project with more than one registered, `serve` printed the ambiguity and exited before answering `initialize`, and `--path` naming a folder without an index did the same. #595 fixed this for linked worktrees only; a folder outside any git repository, such as the scratch workspace Claude Code desktop starts a project-less session in, still lost every tool, including the `graph_root` access to the registered projects that would have worked. `serve` now answers `initialize` and `tools/list` as usual, with instructions that name the registered projects; `graph_root` calls, federated ones included, work as they do anywhere; and a call without `graph_root`, or a read of a project resource, is refused with a message listing the registered projects to choose from. A server with no project does no per-project work: no catch-up sync, savings accounting, or server-registry entry. Reported by @equwal.
 
 ## [7.13.0] - 2026-09-29
 

@@ -1125,7 +1125,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
             // Track the first stdin line if we need to peek at `initialize` roots.
             let mut peeked_line: Option<String> = None;
             let cg = match serve::ensure_initialized(&project_path).await {
-                Ok(cg) => cg,
+                Ok(cg) => Some(cg),
                 Err(_) => {
                     // A linked worktree outside its main checkout: the upward
                     // walk cannot reach the main index, so borrow it the way a
@@ -1143,24 +1143,40 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                         None => serve::resolve_serve_from_global_db().await,
                     };
                     match fallback {
-                        Some(p) => serve::ensure_initialized(&p).await?,
+                        Some(p) => Some(serve::ensure_initialized(&p).await?),
                         None => {
                             // Last resort: peek at the first stdin line for MCP
                             // `initialize` roots (e.g. VS Code multi-folder workspace).
                             match serve::resolve_serve_from_mcp_roots(&mut peeked_line).await {
-                                Some(p) => serve::ensure_initialized(&p).await?,
+                                Some(p) => Some(serve::ensure_initialized(&p).await?),
+                                // No project resolved (#606). Exiting here
+                                // left the host with a failed server and the
+                                // session with no tools at all, although
+                                // `graph_root` still reaches every registered
+                                // project. Serve with no default project.
                                 None => {
-                                    return Err(tokensave::errors::TokenSaveError::Config {
-                                        message: format!(
-                                            "no TokenSave index found at '{}' and no projects registered in the global database — run 'tokensave init' in your project first",
-                                            project_path.display()
-                                        ),
-                                    });
+                                    eprintln!(
+                                        "[tokensave] no TokenSave index found at '{}'; serving \
+                                         with no default project — tool calls must pass graph_root",
+                                        project_path.display()
+                                    );
+                                    None
                                 }
                             }
                         }
                     }
                 }
+            };
+
+            let Some(cg) = cg else {
+                // No index is open, so none of the per-project startup below
+                // applies: no scope warning, memory baseline, or server
+                // registry entry, which records which server holds which index.
+                tokensave::cancel::install_signal_handlers();
+                watch_for_orphaning();
+                let server = tokensave::mcp::McpServer::new_without_project().await;
+                run_mcp_server(&server, timings, peeked_line, idle_timeout_secs).await?;
+                exit_after_serve();
             };
 
             // Set the shutdown flag the instant a signal arrives, rather than
@@ -1206,43 +1222,11 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
             } else {
                 tokensave::mcp::McpServer::new(cg, scope_prefix).await
             };
-            server.set_timings_enabled(timings);
-            let mut transport = tokensave::mcp::StdioTransport::new();
-            // If we peeked at stdin to read `initialize` roots, replay that line.
-            if let Some(line) = peeked_line {
-                server.handle_and_write(&line, &mut transport).await;
-            }
-            server
-                .run_with_idle_timeout(
-                    &mut transport,
-                    idle_timeout_secs.map(std::time::Duration::from_secs),
-                )
-                .await?;
-            server.shutdown().await;
+            run_mcp_server(&server, timings, peeked_line, idle_timeout_secs).await?;
             // A hard kill skips this; that is what reaping on startup and on
             // read is for.
             tokensave::servers::unregister();
-            // Exit explicitly rather than unwinding out of `main` (#450/#436).
-            //
-            // `tokio::io::stdin()` performs its reads on a blocking thread,
-            // and a blocking task cannot be cancelled — so the outstanding
-            // read is still parked when the run loop leaves. Dropping the
-            // runtime waits for it, and under a supervisor that holds our
-            // stdin open it never completes: the server ran its whole
-            // graceful shutdown, printed its summary, and then sat there
-            // alive and unkillable by anything short of `SIGKILL`. That is
-            // the reported "kill did nothing" and the servers that "never
-            // exit" under a live parent.
-            //
-            // Shutdown has already persisted counters and checkpointed the
-            // WAL, and is idempotent, so there is nothing left to unwind for.
-            // Flush stdout first: a response written just before a signal
-            // must still reach the client.
-            {
-                use std::io::Write;
-                let _ = std::io::stdout().flush();
-            }
-            std::process::exit(0);
+            exit_after_serve();
         }
         Commands::Servers { json } => {
             let entries = tokensave::servers::list();
@@ -2319,6 +2303,52 @@ fn watch_for_orphaning() {
 /// No reparenting signal to watch for off Unix.
 #[cfg(not(unix))]
 fn watch_for_orphaning() {}
+
+/// Runs a `serve` MCP server on stdio until the client leaves, the idle
+/// timeout passes, or a signal arrives, then shuts it down.
+///
+/// `peeked_line` is the first stdin line, when `serve` already read it to look
+/// for `initialize` roots; it is replayed so the server still answers it.
+async fn run_mcp_server(
+    server: &std::sync::Arc<tokensave::mcp::McpServer>,
+    timings: bool,
+    peeked_line: Option<String>,
+    idle_timeout_secs: Option<u64>,
+) -> tokensave::errors::Result<()> {
+    server.set_timings_enabled(timings);
+    let mut transport = tokensave::mcp::StdioTransport::new();
+    if let Some(line) = peeked_line {
+        server.handle_and_write(&line, &mut transport).await;
+    }
+    server
+        .run_with_idle_timeout(
+            &mut transport,
+            idle_timeout_secs.map(std::time::Duration::from_secs),
+        )
+        .await?;
+    server.shutdown().await;
+    Ok(())
+}
+
+/// Ends a `serve` process once its server has shut down.
+///
+/// Exits explicitly rather than unwinding out of `main` (#450/#436).
+/// `tokio::io::stdin()` performs its reads on a blocking thread, and a blocking
+/// task cannot be cancelled — so the outstanding read is still parked when the
+/// run loop leaves. Dropping the runtime waits for it, and under a supervisor
+/// that holds our stdin open it never completes: the server ran its whole
+/// graceful shutdown, printed its summary, and then sat there alive and
+/// unkillable by anything short of `SIGKILL`. That is the reported "kill did
+/// nothing" and the servers that "never exit" under a live parent.
+///
+/// Shutdown has already persisted counters and checkpointed the WAL, and is
+/// idempotent, so there is nothing left to unwind for. Stdout is flushed
+/// first: a response written just before a signal must still reach the client.
+fn exit_after_serve() -> ! {
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    std::process::exit(0);
+}
 
 #[cfg(test)]
 mod tests {

@@ -151,6 +151,7 @@ mod scala_extraction_test;
 mod serve_disable_test;
 mod serve_idle_timeout_test;
 mod serve_sigterm_test;
+mod serve_without_project_test;
 mod sibling_projects_test;
 mod skipped_summary_cli_test;
 mod sql_extraction_test;

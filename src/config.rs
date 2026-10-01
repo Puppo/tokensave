@@ -53,6 +53,22 @@ impl Toolset {
             _ => None,
         }
     }
+
+    /// The toolset to list: `TOKENSAVE_TOOLS` when it names one, otherwise
+    /// `configured`. Shared by a served project and a server with no default
+    /// project (#606), which has only the built-in default to fall back to.
+    pub fn resolve(configured: Self) -> Self {
+        std::env::var("TOKENSAVE_TOOLS")
+            .ok()
+            .and_then(|value| Self::parse(&value))
+            .unwrap_or(configured)
+    }
+}
+
+/// Whether per-call savings are surfaced to the agent (#356):
+/// `TOKENSAVE_REPORT_SAVINGS` when set, otherwise `configured`.
+pub fn resolve_report_savings(configured: bool) -> bool {
+    env_bool_override("TOKENSAVE_REPORT_SAVINGS", configured)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -330,10 +330,59 @@ impl Drop for AccountingTaskGuard {
     }
 }
 
+/// What the `initialize` instructions can say about the projects reachable
+/// through `graph_root`.
+#[derive(Clone, Copy)]
+enum ServedProjects<'a> {
+    /// A default project is served; these initialized projects sit beside it.
+    Default { siblings: &'a [String] },
+    /// No default project (#606); these projects are registered.
+    None { registered: &'a [String] },
+}
+
+/// Registered projects whose index still exists on disk, sorted.
+async fn indexed_registered_projects(gdb: &GlobalDb) -> Vec<String> {
+    let mut paths: Vec<String> = gdb
+        .list_project_paths()
+        .await
+        .into_iter()
+        .filter(|path| TokenSave::is_initialized(std::path::Path::new(path)))
+        .collect();
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+/// Explains that this server has no default project (#606) and how a call
+/// can still be answered.
+fn no_default_project_message(registered: &[String]) -> String {
+    let choices = if registered.is_empty() {
+        "No projects are registered yet; run `tokensave init` in a project first.".to_string()
+    } else {
+        format!(
+            "Pass graph_root with one of the registered projects: {}.",
+            registered.join(", ")
+        )
+    };
+    format!(
+        "This tokensave server has no default project: it was started outside every indexed \
+         project, so a call without graph_root has no graph to answer from. {choices} To give \
+         the server a default project, start it inside one or with `--path <project>`."
+    )
+}
+
 /// The MCP server wrapping a `TokenSave` instance.
 // Lock ordering: file_token_map -> tool_call_counts (never nested)
 pub struct McpServer {
-    cg: TokenSave,
+    /// The default project, answered by every call that names no
+    /// `graph_root`. `None` when `serve` resolved no project (#606): the
+    /// server still starts so `graph_root` reaches the registered projects,
+    /// and a call without one is refused with the list of them.
+    cg: Option<TokenSave>,
+    /// The registered projects, snapshotted at startup when there is no
+    /// default project and named in the `initialize` instructions and in
+    /// the refusal of a call without `graph_root` (#606). Empty otherwise.
+    registered_projects: Vec<String>,
     graph_scoped_tools: HashSet<String>,
     /// Selector-less local graph tools refused after tracked-branch drift.
     selectorless_local_graph_tools: HashSet<String>,
@@ -605,7 +654,20 @@ impl McpServer {
     /// `packages/*/target`) drove unbounded event traffic and `FileId`
     /// cache growth.
     pub async fn new(cg: TokenSave, scope_prefix: Option<String>) -> Arc<Self> {
-        Self::new_inner(cg, scope_prefix, true).await
+        Self::new_inner(Some(cg), scope_prefix, true).await
+    }
+
+    /// A server with no default project (#606), for a `serve` that resolved
+    /// none: launched outside every indexed project with several registered,
+    /// or with `--path` naming a folder that has no index.
+    ///
+    /// Exiting instead used to cost the session every tool, including the
+    /// `graph_root` access to the registered projects that would still have
+    /// worked. This server answers `initialize` and `tools/list` as usual,
+    /// serves `graph_root` calls, and refuses a call without one with the
+    /// list of registered projects to choose from.
+    pub async fn new_without_project() -> Arc<Self> {
+        Self::new_inner(None, None, false).await
     }
 
     /// [`Self::new`] for a server whose project root was named explicitly
@@ -616,11 +678,11 @@ impl McpServer {
     /// suppressed; its "run `tokensave init` here" remedy is wrong for a
     /// deliberate cross-repo serve (#201).
     pub async fn new_explicit_root(cg: TokenSave, scope_prefix: Option<String>) -> Arc<Self> {
-        Self::new_inner(cg, scope_prefix, false).await
+        Self::new_inner(Some(cg), scope_prefix, false).await
     }
 
     async fn new_inner(
-        cg: TokenSave,
+        cg: Option<TokenSave>,
         scope_prefix: Option<String>,
         check_worktree_mismatch: bool,
     ) -> Arc<Self> {
@@ -628,7 +690,10 @@ impl McpServer {
         // prefix is derived from an OS path, so on Windows it arrives with
         // `\` separators and would never match any indexed path (#242).
         let scope_prefix = scope_prefix.map(|p| p.replace('\\', "/"));
-        let file_token_map = cg.get_file_token_map().await.unwrap_or_default();
+        let file_token_map = match &cg {
+            Some(cg) => cg.get_file_token_map().await.unwrap_or_default(),
+            None => HashMap::new(),
+        };
         let graph_scoped_tools = get_tool_definitions()
             .into_iter()
             .filter(is_graph_scoped_tool)
@@ -650,23 +715,32 @@ impl McpServer {
         // the whole `tools/list` payload here over-stated the up-front cost
         // by more than an order of magnitude.
         let schema_overhead = schema_overhead_tokens(&get_always_load_tool_definitions());
-        let persisted = cg.get_tokens_saved().await.unwrap_or(0);
+        let persisted = match &cg {
+            Some(cg) => cg.get_tokens_saved().await.unwrap_or(0),
+            None => 0,
+        };
         let global_db = GlobalDb::open().await;
         // Register this project in the global DB with its current tokens
         let mut sibling_projects = Vec::new();
+        let mut registered_projects = Vec::new();
         if let Some(ref gdb) = global_db {
-            gdb.upsert(cg.project_root(), persisted).await;
-            // Snapshot the neighbouring graphs once, for the initialize
-            // instructions (#375). `tokensave_status` re-reads them live, so a
-            // project indexed later in the session is still discoverable.
-            sibling_projects = gdb.sibling_projects(cg.project_root()).await;
+            match &cg {
+                Some(cg) => {
+                    gdb.upsert(cg.project_root(), persisted).await;
+                    // Snapshot the neighbouring graphs once, for the initialize
+                    // instructions (#375). `tokensave_status` re-reads them live, so a
+                    // project indexed later in the session is still discoverable.
+                    sibling_projects = gdb.sibling_projects(cg.project_root()).await;
+                }
+                None => registered_projects = indexed_registered_projects(gdb).await,
+            }
         }
 
         // Detect borrowed-worktree index once at startup so every read
         // tool can cheaply prefix a heads-up. Two git rev-parse spawns
         // worst case (#312). spawn_blocking because the underlying
         // `Command::output()` can sit on slow disks.
-        let worktree_mismatch = if check_worktree_mismatch {
+        let worktree_mismatch = if let (true, Some(cg)) = (check_worktree_mismatch, &cg) {
             let project_root = cg.project_root().to_path_buf();
             tokio::task::spawn_blocking(move || {
                 let cwd = std::env::current_dir().ok()?;
@@ -679,8 +753,10 @@ impl McpServer {
             None
         };
 
+        let has_project = cg.is_some();
         let server = Arc::new(Self {
             cg,
+            registered_projects,
             graph_scoped_tools,
             selectorless_local_graph_tools,
             stats: ServerStats::new(),
@@ -709,7 +785,8 @@ impl McpServer {
             last_staleness_check_at: AtomicI64::new(0),
             lazy_sync_in_flight: Arc::new(AtomicBool::new(false)),
             worktree_mismatch,
-            startup_catch_up_done: AtomicBool::new(false),
+            // Nothing to catch up without a project, so it is already done.
+            startup_catch_up_done: AtomicBool::new(!has_project),
             version_reindex_started: AtomicBool::new(false),
             version_reindex_done: AtomicBool::new(false),
             last_local_age_warning_at: AtomicI64::new(0),
@@ -731,7 +808,7 @@ impl McpServer {
         // loop exits (#396). The scope bound in `find_stale_files_bounded`
         // caps how long that window can be; cooperative cancellation is
         // tracked separately.
-        {
+        if has_project {
             let weak = Arc::downgrade(&server);
             tokio::spawn(async move {
                 if let Some(s) = weak.upgrade() {
@@ -784,7 +861,8 @@ impl McpServer {
     /// The message names both trees or branches and the setting responsible, so
     /// the refusal is actionable without reading the docs.
     fn strict_tree_refusal(&self, tool_name: &str) -> Option<String> {
-        if !self.cg.get_config().strict_tree {
+        let cg = self.cg.as_ref()?;
+        if !cg.get_config().strict_tree {
             return None;
         }
         if Self::STRICT_MODE_DIAGNOSTIC_TOOLS.contains(&tool_name) {
@@ -805,7 +883,7 @@ impl McpServer {
         // Re-checked per call, unlike the worktree mismatch above: drift is
         // caused by a `git checkout` during the session, so a value computed
         // at startup would always report none.
-        if let Some(drift) = self.cg.branch_drift() {
+        if let Some(drift) = cg.branch_drift() {
             return Some(format!(
                 "refusing: strict_tree is enabled and this server is serving branch '{}' while \
                  the working tree is on '{}'. Restart the MCP server to serve this branch, or \
@@ -832,7 +910,7 @@ impl McpServer {
             return None;
         }
 
-        let drift = self.cg.branch_drift()?;
+        let drift = self.cg.as_ref()?.branch_drift()?;
         Some(format!(
             "refusing: MCP server serves branch '{}' while the working tree is on '{}'. \
              Restart the MCP server to serve this branch, or reopen it for the working branch.",
@@ -875,7 +953,7 @@ impl McpServer {
                 root: root.clone(),
                 branch: branch.clone(),
             };
-            let selected = match select_graph(selector, self.cg.project_root()).await {
+            let selected = match select_graph(selector, self.served_root()).await {
                 Ok(selected) => selected,
                 Err(error) => {
                     failures.push(format!("{}: {error}", root.display()));
@@ -966,9 +1044,63 @@ impl McpServer {
     /// integration tests can drive the staleness pipeline directly,
     /// bypassing the 30 s cooldown in
     /// [`maybe_sync_if_stale`](Self::maybe_sync_if_stale).
+    /// `None` for a server with no default project (#606).
     #[doc(hidden)]
-    pub fn cg(&self) -> &TokenSave {
-        &self.cg
+    pub fn cg(&self) -> Option<&TokenSave> {
+        self.cg.as_ref()
+    }
+
+    /// The root of the default project, or `None` when there is none (#606).
+    fn served_root(&self) -> Option<&std::path::Path> {
+        self.cg.as_ref().map(TokenSave::project_root)
+    }
+
+    /// What the `initialize` instructions say about other projects: the
+    /// default project's siblings, or the registered projects when there is
+    /// no default project (#606).
+    fn served_projects(&self) -> ServedProjects<'_> {
+        if self.cg.is_some() {
+            ServedProjects::Default {
+                siblings: &self.sibling_projects,
+            }
+        } else {
+            ServedProjects::None {
+                registered: &self.registered_projects,
+            }
+        }
+    }
+
+    /// Whether savings are surfaced to the agent: the project's setting, or
+    /// the built-in default when there is no project (#606).
+    fn report_savings(&self) -> bool {
+        self.cg.as_ref().map_or_else(
+            || {
+                crate::config::resolve_report_savings(
+                    crate::config::TokenSaveConfig::default().report_savings,
+                )
+            },
+            TokenSave::report_savings,
+        )
+    }
+
+    /// The toolset to list: the project's, or the built-in default when there
+    /// is no project (#606). `TOKENSAVE_TOOLS` overrides either.
+    fn toolset(&self) -> crate::config::Toolset {
+        self.cg.as_ref().map_or_else(
+            || crate::config::Toolset::resolve(crate::config::Toolset::default()),
+            TokenSave::toolset,
+        )
+    }
+
+    /// The refusal of a call that needs the default project when there is
+    /// none (#606). Names the registered projects, since `graph_root` with
+    /// one of them is how the call can still be answered.
+    fn no_default_project_error(&self, id: Value) -> JsonRpcResponse {
+        JsonRpcResponse::error(
+            id,
+            ErrorCode::InvalidRequest,
+            no_default_project_message(&self.registered_projects),
+        )
     }
 
     /// Sums the raw (full-file) approximate token weight of the given files
@@ -1019,14 +1151,17 @@ impl McpServer {
         if net == 0 {
             return;
         }
+        let Some(cg) = self.cg.as_ref() else {
+            return;
+        };
         let new_total = self.tokens_saved.fetch_add(net, Ordering::Relaxed) + net;
         // Persist to DB (best-effort, don't block on failure)
-        let _ = self.cg.set_tokens_saved(new_total).await;
+        let _ = cg.set_tokens_saved(new_total).await;
         // Also increment the resettable local counter
-        let _ = self.cg.add_local_counter(net).await;
+        let _ = cg.add_local_counter(net).await;
         // Best-effort update to global DB
         if let Some(ref gdb) = self.global_db {
-            gdb.upsert(self.cg.project_root(), new_total).await;
+            gdb.upsert(cg.project_root(), new_total).await;
         }
     }
 
@@ -1036,7 +1171,10 @@ impl McpServer {
     /// tracks newly indexed / removed files.
     pub async fn refresh_file_token_map(&self) {
         // best-effort; leave stale map in place if the DB read fails
-        let Ok(fresh) = self.cg.get_file_token_map().await else {
+        let Some(cg) = self.cg.as_ref() else {
+            return;
+        };
+        let Ok(fresh) = cg.get_file_token_map().await else {
             return;
         };
         if let Ok(mut guard) = self.file_token_map.lock() {
@@ -1055,7 +1193,11 @@ impl McpServer {
     /// The completion flag is flipped on every exit path (including
     /// errors) so [`Self::wait_for_startup_catch_up`] never hangs.
     pub async fn run_startup_catch_up_sync(&self) {
-        let stale = match self.cg.find_stale_files_bounded().await {
+        let Some(cg) = self.cg.as_ref() else {
+            self.startup_catch_up_done.store(true, Ordering::Release);
+            return;
+        };
+        let stale = match cg.find_stale_files_bounded().await {
             crate::tokensave::AutoSyncScope::Sync(stale) => stale,
             scope => {
                 eprintln!("[tokensave] {}", auto_sync_refusal(&scope));
@@ -1064,7 +1206,7 @@ impl McpServer {
             }
         };
         if !stale.is_empty() {
-            if let Err(e) = self.cg.sync_if_stale_silent(&stale).await {
+            if let Err(e) = cg.sync_if_stale_silent(&stale).await {
                 eprintln!("[tokensave] startup catch-up sync failed: {e}");
                 self.startup_catch_up_done.store(true, Ordering::Release);
                 return;
@@ -1149,7 +1291,10 @@ impl McpServer {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
-        let last_sync = self.cg.last_sync_timestamp().await;
+        let Some(cg) = self.cg.as_ref() else {
+            return;
+        };
+        let last_sync = cg.last_sync_timestamp().await;
         if now.saturating_sub(last_sync) < 30 {
             return;
         }
@@ -1212,7 +1357,10 @@ impl McpServer {
     /// the token map. Split out of [`Self::maybe_sync_if_stale`] so it can run
     /// in a detached task that outlives the call that triggered it.
     async fn run_lazy_resync(&self) {
-        let stale = match self.cg.find_stale_files_bounded().await {
+        let Some(cg) = self.cg.as_ref() else {
+            return;
+        };
+        let stale = match cg.find_stale_files_bounded().await {
             crate::tokensave::AutoSyncScope::Sync(stale) => stale,
             scope => {
                 eprintln!("[tokensave] {}", auto_sync_refusal(&scope));
@@ -1220,7 +1368,7 @@ impl McpServer {
             }
         };
         if !stale.is_empty() {
-            if let Err(e) = self.cg.sync_if_stale_silent(&stale).await {
+            if let Err(e) = cg.sync_if_stale_silent(&stale).await {
                 eprintln!("[tokensave] lazy sync failed: {e}");
                 return;
             }
@@ -1272,7 +1420,10 @@ impl McpServer {
     /// session gate so the work is not retried in a tight loop.
     async fn run_version_reindex(&self) {
         let running = env!("CARGO_PKG_VERSION");
-        let project_root = self.cg.project_root().to_path_buf();
+        let Some(cg) = self.cg.as_ref() else {
+            return;
+        };
+        let project_root = cg.project_root().to_path_buf();
 
         let mut config = match crate::config::load_config(&project_root) {
             Ok(c) => c,
@@ -1284,7 +1435,7 @@ impl McpServer {
 
         let bump = crate::cloud::bump_kind(&config.last_indexed_version, running);
         let needs_reindex =
-            bump == crate::cloud::BumpKind::Major || self.cg.needs_schema_upgrade().await;
+            bump == crate::cloud::BumpKind::Major || cg.needs_schema_upgrade().await;
 
         if needs_reindex {
             eprintln!(
@@ -1292,7 +1443,7 @@ impl McpServer {
                  (indexed by {:?}, running {running}) — forcing project reindex…",
                 config.last_indexed_version
             );
-            if let Err(e) = self.cg.index_all().await {
+            if let Err(e) = cg.index_all().await {
                 eprintln!("[tokensave] version reindex failed: {e}");
                 return;
             }
@@ -1723,13 +1874,17 @@ impl McpServer {
         let tokens_saved = self.tokens_saved.load(Ordering::Relaxed);
 
         // Persist final tokens-saved value
-        if let Err(e) = self.cg.set_tokens_saved(tokens_saved).await {
-            eprintln!("[tokensave] warning: failed to persist tokens_saved on shutdown: {e}");
+        if let Some(cg) = self.cg.as_ref() {
+            if let Err(e) = cg.set_tokens_saved(tokens_saved).await {
+                eprintln!("[tokensave] warning: failed to persist tokens_saved on shutdown: {e}");
+            }
         }
 
         // Update global DB with final count and checkpoint it
         if let Some(ref gdb) = self.global_db {
-            gdb.upsert(self.cg.project_root(), tokens_saved).await;
+            if let Some(cg) = self.cg.as_ref() {
+                gdb.upsert(cg.project_root(), tokens_saved).await;
+            }
             gdb.checkpoint().await;
         }
 
@@ -1758,8 +1913,10 @@ impl McpServer {
         }
 
         // Checkpoint WAL to merge it into the main database file
-        if let Err(e) = self.cg.checkpoint().await {
-            eprintln!("[tokensave] warning: failed to checkpoint WAL on shutdown: {e}");
+        if let Some(cg) = self.cg.as_ref() {
+            if let Err(e) = cg.checkpoint().await {
+                eprintln!("[tokensave] warning: failed to checkpoint WAL on shutdown: {e}");
+            }
         }
 
         eprintln!(
@@ -1788,9 +1945,9 @@ impl McpServer {
             "initialize" => Some(Self::handle_initialize(
                 id,
                 request.params.as_ref(),
-                self.cg.report_savings(),
-                &self.sibling_projects,
-                self.cg.toolset(),
+                self.report_savings(),
+                self.served_projects(),
+                self.toolset(),
             )),
             "initialized" | "notifications/initialized" | "notifications/roots/list_changed" => {
                 // Known notifications - no response required
@@ -1841,7 +1998,7 @@ impl McpServer {
         id: Value,
         params: Option<&Value>,
         report_savings: bool,
-        sibling_projects: &[String],
+        projects: ServedProjects<'_>,
         toolset: crate::config::Toolset,
     ) -> JsonRpcResponse {
         const BASE_INSTRUCTIONS: &str = "tokensave is a code-graph MCP server. \
@@ -1867,13 +2024,23 @@ impl McpServer {
         // Sibling checkouts are queryable through `graph_root` but nothing else
         // reveals that they exist, so a cross-repo session reads an empty result
         // as "no such symbol" instead of retrying next door (#375).
-        if !sibling_projects.is_empty() {
-            let _ = write!(
-                instructions,
-                " These other initialized projects sit beside this one and can be \
-                 queried by passing graph_root: {}.",
-                sibling_projects.join(", ")
-            );
+        match projects {
+            ServedProjects::Default { siblings } if !siblings.is_empty() => {
+                let _ = write!(
+                    instructions,
+                    " These other initialized projects sit beside this one and can be \
+                     queried by passing graph_root: {}.",
+                    siblings.join(", ")
+                );
+            }
+            ServedProjects::Default { .. } => {}
+            // #606: without a default project every graph call needs
+            // `graph_root`, so the session must learn that, and the choices,
+            // before its first call is refused.
+            ServedProjects::None { registered } => {
+                instructions.push(' ');
+                instructions.push_str(&no_default_project_message(registered));
+            }
         }
 
         // #576: with the core toolset the list grows when `tokensave_more` is
@@ -1914,7 +2081,7 @@ impl McpServer {
             .lock()
             .map(|areas| areas.clone())
             .unwrap_or_default();
-        let tools = get_listed_tool_definitions(self.cg.toolset(), &revealed);
+        let tools = get_listed_tool_definitions(self.toolset(), &revealed);
         // Marks the schema as actually delivered so `handle_tools_call` knows
         // it's fair to debit `schema_overhead_tokens` against this session —
         // see `schema_served`.
@@ -1938,7 +2105,7 @@ impl McpServer {
                 format!("unknown area '{area}'. Areas: {}, all", names.join(", ")),
             );
         }
-        let text = if self.cg.toolset() == crate::config::Toolset::Full {
+        let text = if self.toolset() == crate::config::Toolset::Full {
             "All tools are already listed.".to_string()
         } else {
             let added = self
@@ -2017,12 +2184,18 @@ impl McpServer {
             );
         };
 
+        if uri == "tokensave://schema" {
+            return Self::read_resource_schema(id);
+        }
+        // Every other resource describes the default project (#606).
+        let Some(cg) = self.cg.as_ref() else {
+            return self.no_default_project_error(id);
+        };
         match uri {
-            "tokensave://status" => self.read_resource_status(id).await,
-            "tokensave://files" => self.read_resource_files(id).await,
-            "tokensave://overview" => self.read_resource_overview(id).await,
-            "tokensave://branches" => self.read_resource_branches(id),
-            "tokensave://schema" => Self::read_resource_schema(id),
+            "tokensave://status" => Self::read_resource_status(cg, id).await,
+            "tokensave://files" => Self::read_resource_files(cg, id).await,
+            "tokensave://overview" => Self::read_resource_overview(cg, id).await,
+            "tokensave://branches" => Self::read_resource_branches(cg, id),
             _ => JsonRpcResponse::error(
                 id,
                 ErrorCode::InvalidParams,
@@ -2047,8 +2220,8 @@ impl McpServer {
     }
 
     /// Returns graph statistics as a JSON resource.
-    async fn read_resource_status(&self, id: Value) -> JsonRpcResponse {
-        match self.cg.get_stats().await {
+    async fn read_resource_status(cg: &TokenSave, id: Value) -> JsonRpcResponse {
+        match cg.get_stats().await {
             Ok(stats) => {
                 let text = serde_json::to_string_pretty(&stats).unwrap_or_default();
                 JsonRpcResponse::success(
@@ -2071,8 +2244,8 @@ impl McpServer {
     }
 
     /// Returns the file list as a text resource (grouped by directory).
-    async fn read_resource_files(&self, id: Value) -> JsonRpcResponse {
-        match self.cg.get_all_files().await {
+    async fn read_resource_files(cg: &TokenSave, id: Value) -> JsonRpcResponse {
+        match cg.get_all_files().await {
             Ok(mut files) => {
                 files.sort_by(|a, b| a.path.cmp(&b.path));
                 let mut groups: std::collections::BTreeMap<String, Vec<String>> =
@@ -2119,8 +2292,8 @@ impl McpServer {
     }
 
     /// Returns a high-level project overview as a text resource.
-    async fn read_resource_overview(&self, id: Value) -> JsonRpcResponse {
-        let stats = match self.cg.get_stats().await {
+    async fn read_resource_overview(cg: &TokenSave, id: Value) -> JsonRpcResponse {
+        let stats = match cg.get_stats().await {
             Ok(s) => s,
             Err(e) => {
                 return JsonRpcResponse::error(
@@ -2132,7 +2305,7 @@ impl McpServer {
         };
 
         let mut lines = Vec::new();
-        lines.push(format!("Project: {}", self.cg.project_root().display()));
+        lines.push(format!("Project: {}", cg.project_root().display()));
         lines.push(format!(
             "Graph: {} nodes, {} edges, {} files",
             stats.node_count, stats.edge_count, stats.file_count
@@ -2171,9 +2344,9 @@ impl McpServer {
         )
     }
 
-    fn read_resource_branches(&self, id: Value) -> JsonRpcResponse {
-        let tokensave_dir = crate::config::get_tokensave_dir(self.cg.project_root());
-        let current = self.cg.active_branch();
+    fn read_resource_branches(cg: &TokenSave, id: Value) -> JsonRpcResponse {
+        let tokensave_dir = crate::config::get_tokensave_dir(cg.project_root());
+        let current = cg.active_branch();
 
         let branches: Vec<Value> = match crate::branch_meta::load_branch_meta(&tokensave_dir) {
             Some(meta) => meta
@@ -2326,7 +2499,7 @@ impl McpServer {
                 .into_iter()
                 .next()
                 .unwrap_or_else(|| unreachable!("a selection always names at least one root"));
-            let selected = match select_graph(selector, self.cg.project_root()).await {
+            let selected = match select_graph(selector, self.served_root()).await {
                 Ok(selected) => selected,
                 Err(TokenSaveError::Config { message }) => {
                     return JsonRpcResponse::error(
@@ -2363,6 +2536,10 @@ impl McpServer {
         };
 
         if selected.is_none() {
+            // #606: with no default project, only `graph_root` can answer.
+            if self.cg.is_none() {
+                return self.no_default_project_error(id);
+            }
             if let Some(reason) = self.branch_drift_refusal(tool_name) {
                 return JsonRpcResponse::error(id, ErrorCode::InvalidRequest, reason);
             }
@@ -2401,10 +2578,11 @@ impl McpServer {
         } else {
             None
         };
-        let (dispatch_graph, scope_prefix) = selected.as_ref().map_or_else(
-            || (&self.cg, self.scope_prefix()),
-            |selected| (&selected.cg, None),
-        );
+        let (dispatch_graph, scope_prefix) = match (selected.as_ref(), self.cg.as_ref()) {
+            (Some(selected), _) => (&selected.cg, None),
+            (None, Some(cg)) => (cg, self.scope_prefix()),
+            (None, None) => return self.no_default_project_error(id),
+        };
         let baseline = baseline_policy(tool_name, &arguments);
         let dispatch_outcome = handle_tool_call_with_session(
             dispatch_graph,
@@ -2514,6 +2692,10 @@ impl McpServer {
                     return JsonRpcResponse::success(id, result.value);
                 }
 
+                // Past the selected-graph return, the default project
+                // answered this call.
+                let cg = dispatch_graph;
+
                 // Estimate approximate token count of the tool's own answer,
                 // before any of the warnings/banners below are attached.
                 // Used as the baseline-cap basis (see `before_tokens` below)
@@ -2563,17 +2745,15 @@ impl McpServer {
                 // Replaces the previous all-or-nothing "STALE INDEX"
                 // warning that made agents distrust the entire answer.
                 if !result.touched_files.is_empty() {
-                    let stale_files = self.cg.check_file_staleness(&result.touched_files).await;
+                    let stale_files = cg.check_file_staleness(&result.touched_files).await;
                     if !stale_files.is_empty() {
-                        let still_stale = match self.cg.sync_if_stale(&stale_files).await {
+                        let still_stale = match cg.sync_if_stale(&stale_files).await {
                             Ok(false) => false,        // sync completed; files now fresh
                             Ok(true) | Err(_) => true, // still stale (lock contention / sync error)
                         };
                         if still_stale {
-                            let banner = format_per_file_staleness_banner(
-                                self.cg.project_root(),
-                                &stale_files,
-                            );
+                            let banner =
+                                format_per_file_staleness_banner(cg.project_root(), &stale_files);
                             // Machine-readable marker. Same shape as before
                             // so existing scrapers keep working.
                             let stale_json = serde_json::to_string(&stale_files)
@@ -2599,7 +2779,7 @@ impl McpServer {
                 }
 
                 // Warn if serving from a fallback (ancestor) branch DB.
-                if let Some(warning) = self.cg.fallback_warning() {
+                if let Some(warning) = cg.fallback_warning() {
                     let warning = format!("WARNING: {warning}");
                     if let Some(content) = result
                         .value
@@ -2617,7 +2797,7 @@ impl McpServer {
                 // so a per-file fallback fires the warning forever on quiet
                 // repos (#86).
                 {
-                    let last_time = self.cg.last_sync_timestamp().await;
+                    let last_time = cg.last_sync_timestamp().await;
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
@@ -2691,7 +2871,7 @@ impl McpServer {
                 // value computed once would always say "no drift". Same
                 // failure shape though — answers about a tree the user is not
                 // in — so it rides the same channel.
-                if let Some(drift) = self.cg.branch_drift() {
+                if let Some(drift) = cg.branch_drift() {
                     let notice = format!(
                         "WARNING: tokensave results below come from branch '{}', but your \
                          working tree is on '{}' — symbols that exist only on '{}' are \
@@ -2794,7 +2974,7 @@ impl McpServer {
                 // that was never sent — and accounting to the global DB below
                 // is deliberately left outside this gate, so `tokensave gain`
                 // still sees every call.
-                let emit_metrics_line = before_tokens > 0 && self.cg.report_savings();
+                let emit_metrics_line = before_tokens > 0 && cg.report_savings();
                 let render_metrics = |before: u64, after: u64, result: u64, saved: u64| -> String {
                     format!("\ntokensave_metrics: before={before} after={after} result={result} saved={saved}")
                 };
@@ -2827,7 +3007,7 @@ impl McpServer {
                 let credited = self.settle_against_session_debt(raw_delta);
                 self.add_tokens_saved(credited).await;
                 crate::monitor::write_entry(
-                    self.cg.project_root(),
+                    cg.project_root(),
                     "tokensave",
                     tool_name,
                     net_saved,
@@ -2857,7 +3037,7 @@ impl McpServer {
 
                 // Persist to the cross-project savings ledger (best-effort, non-blocking).
                 {
-                    let project_path_str = self.cg.project_root().to_string_lossy().to_string();
+                    let project_path_str = cg.project_root().to_string_lossy().to_string();
                     let tool_name_owned = tool_name.to_string();
                     let ts = crate::tokensave::current_timestamp();
                     #[cfg(feature = "test-transport")]

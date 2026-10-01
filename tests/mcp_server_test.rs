@@ -1137,7 +1137,12 @@ async fn cross_project_selected_queries_leave_both_projects_unchanged() {
             .wait_for_startup_catch_up(std::time::Duration::from_secs(30))
             .await
     );
-    server.cg().checkpoint().await.unwrap();
+    server
+        .cg()
+        .expect("default project")
+        .checkpoint()
+        .await
+        .unwrap();
 
     let local_before = project_snapshot(local_dir.path(), None, "src/main.rs").await;
     let selected_before = project_snapshot(selected_dir.path(), Some("main"), "src/lib.rs").await;
@@ -1929,7 +1934,12 @@ async fn selected_calls_skip_all_accounting_and_preserve_local_schema_charge() {
     let global = tokensave::global_db::GlobalDb::open().await.unwrap();
     let local_path = local_dir.path().to_string_lossy();
     let foreign_path = foreign_dir.path().to_string_lossy();
-    let local_tokens_before = server.cg().get_tokens_saved().await.unwrap();
+    let local_tokens_before = server
+        .cg()
+        .expect("default project")
+        .get_tokens_saved()
+        .await
+        .unwrap();
     let total_ledger_before = global.sum_savings(None, 0).await.calls;
     let local_ledger_before = global.sum_savings(Some(&local_path), 0).await.calls;
     let foreign_ledger_before = global.sum_savings(Some(&foreign_path), 0).await.calls;
@@ -1965,7 +1975,12 @@ async fn selected_calls_skip_all_accounting_and_preserve_local_schema_charge() {
         "selected call must not leave accounting work pending"
     );
     assert_eq!(
-        server.cg().get_tokens_saved().await.unwrap(),
+        server
+            .cg()
+            .expect("default project")
+            .get_tokens_saved()
+            .await
+            .unwrap(),
         local_tokens_before
     );
     assert_eq!(global.sum_savings(None, 0).await.calls, total_ledger_before);

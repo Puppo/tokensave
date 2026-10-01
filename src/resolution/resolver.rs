@@ -227,7 +227,7 @@ fn lang_from_path(path: &str) -> &'static str {
         "c" | "h" => "c",
         "cpp" | "cc" | "cxx" | "hpp" | "hxx" | "hh" | "inl" | "ipp" | "tcc" => "cpp",
         "cs" => "csharp",
-        "rb" => "ruby",
+        "rb" | "rake" => "ruby",
         "php" => "php",
         "scala" | "sc" => "scala",
         "dart" => "dart",

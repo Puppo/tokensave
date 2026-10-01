@@ -187,6 +187,7 @@ impl ErlangExtractor {
             target: id.clone(),
             kind: EdgeKind::Contains,
             line: Some(start_line),
+            resolved_by: None,
         });
 
         // Collect call sites from all clauses.
@@ -252,6 +253,7 @@ impl ErlangExtractor {
             target: id,
             kind: EdgeKind::Contains,
             line: Some(start_line),
+            resolved_by: None,
         });
     }
 
@@ -297,6 +299,7 @@ impl ErlangExtractor {
             target: id,
             kind: EdgeKind::Contains,
             line: Some(start_line),
+            resolved_by: None,
         });
     }
 

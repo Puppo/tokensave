@@ -90,8 +90,70 @@ pub fn language(key: &str) -> Language {
         .unwrap_or_else(|| panic!("ts_provider: unknown language key '{key}'"))
 }
 
+/// Returns the grammar for a source file, chosen by its extension, or `None`
+/// when no bundled grammar covers it.
+///
+/// Used by tools that re-parse a file outside extraction — `tokensave_rename`
+/// locates identifier tokens with it and checks that an edited file still
+/// parses. Unlike [`language`], an unknown extension is not a bug, so this
+/// never panics.
+#[must_use]
+pub fn language_for_path(path: &str) -> Option<Language> {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())?
+        .to_ascii_lowercase();
+    let key = match ext.as_str() {
+        "rs" => "rust",
+        "go" => "go",
+        "java" => "java",
+        "scala" | "sc" => "scala",
+        "ts" | "mts" | "cts" => "typescript",
+        "tsx" => "tsx",
+        "js" | "jsx" | "mjs" | "cjs" => "javascript",
+        "py" | "pyi" => "python",
+        "c" | "h" => "c",
+        "cc" | "cpp" | "cxx" | "hpp" | "hh" | "hxx" | "inl" | "ipp" | "tcc" => "cpp",
+        "cs" => "c_sharp",
+        "kt" | "kts" => "kotlin",
+        "swift" => "swift",
+        "rb" | "rake" => "ruby",
+        "php" => "php",
+        "dart" => "dart",
+        "lua" => "lua",
+        "zig" => "zig",
+        "ex" | "exs" => "elixir",
+        "erl" | "hrl" => "erlang",
+        "hs" => "haskell",
+        "ml" | "mli" => "ocaml",
+        "fs" | "fsi" | "fsx" => "fsharp",
+        "jl" => "julia",
+        "r" => "r",
+        "sh" | "bash" => "bash",
+        "pl" | "pm" => "perl",
+        "ps1" | "psm1" => "powershell",
+        "nix" => "nix",
+        "proto" => "protobuf",
+        "m" => "objc",
+        "clj" | "cljs" | "cljc" => "clojure",
+        "gd" => "gdscript",
+        "as" => "actionscript",
+        _ => return None,
+    };
+    LANGUAGES.get(key).cloned()
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn language_for_path_maps_common_extensions() {
+        assert!(super::language_for_path("src/lib.rs").is_some());
+        assert!(super::language_for_path("app/main.py").is_some());
+        assert!(super::language_for_path("web/App.TSX").is_some());
+        assert!(super::language_for_path("README.md").is_none());
+        assert!(super::language_for_path("Makefile").is_none());
+    }
+
     /// Every key that an extractor passes to `language()` must be present in the
     /// grammar table. Add new entries here whenever a new extractor is added.
     #[test]

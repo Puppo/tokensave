@@ -427,3 +427,144 @@ pub(super) async fn handle_ast_grep_rewrite(cg: &TokenSave, args: Value) -> Resu
         touched_files,
     })
 }
+
+/// Handles `tokensave_rename` (#568): plans a graph-based rename and, when
+/// `dry_run` is false, applies it.
+pub(super) async fn handle_rename(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+    let dry_run = args
+        .get("dry_run")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true);
+    rename(cg, &args, dry_run).await
+}
+
+/// Handles the hidden `tokensave_rename_preview` alias: `tokensave_rename`
+/// with `dry_run` forced on.
+pub(super) async fn handle_rename_preview(cg: &TokenSave, args: Value) -> Result<ToolResult> {
+    rename(cg, &args, true).await
+}
+
+async fn rename(cg: &TokenSave, args: &Value, dry_run: bool) -> Result<ToolResult> {
+    use crate::tokensave::RenameConfidence;
+
+    let node_id = args
+        .get("node_id")
+        .or_else(|| args.get("id"))
+        .and_then(|v| v.as_str());
+    let symbol = args.get("symbol").and_then(|v| v.as_str());
+    let new_name = args.get("new_name").and_then(|v| v.as_str());
+    let allow_heuristic = args
+        .get("allow_heuristic")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let root_override = project_root_arg(args);
+
+    let Some(target) = cg.rename_target(node_id, symbol).await? else {
+        let id = node_id.unwrap_or_default();
+        return Ok(ToolResult {
+            value: json!({
+                "content": [{ "type": "text", "text": format!("Node not found: {id}") }]
+            }),
+            touched_files: vec![],
+        });
+    };
+    let plan = cg.plan_rename(target, new_name, root_override).await?;
+
+    let mut by_file: Vec<(String, Vec<Value>)> = Vec::new();
+    let mut text_only: Vec<Value> = Vec::new();
+    for site in &plan.sites {
+        let value = serde_json::to_value(site).unwrap_or_default();
+        if site.confidence == RenameConfidence::TextOnly {
+            text_only.push(value);
+            continue;
+        }
+        match by_file.last_mut() {
+            Some((file, sites)) if *file == site.file => sites.push(value),
+            _ => by_file.push((site.file.clone(), vec![value])),
+        }
+    }
+    let touched_files: Vec<String> = by_file.iter().map(|(f, _)| f.clone()).collect();
+    let files: Vec<Value> = by_file
+        .into_iter()
+        .map(|(file, sites)| json!({ "file": file, "sites": sites }))
+        .collect();
+
+    let mut output = json!({
+        "symbol": {
+            "id": plan.target.id,
+            "name": plan.old_name,
+            "kind": plan.target.kind.as_str(),
+            "qualified_name": plan.target.qualified_name,
+            "file": plan.target.file_path,
+            "line": super::display_line(plan.target.start_line),
+        },
+        "new_name": plan.new_name,
+        "dry_run": dry_run,
+        "allow_heuristic": allow_heuristic,
+        "note": "graph-based, not binding-aware: see the confidence classes in the tool description. line and column are 1-based; column counts bytes, not characters",
+        "counts": plan.counts(),
+        "files": files,
+        "text_only": text_only,
+    });
+    if !plan.blockers.is_empty() {
+        output["blockers"] = json!(plan.blockers);
+    }
+    if !plan.warnings.is_empty() {
+        output["warnings"] = json!(plan.warnings);
+    }
+    if plan.unlinked_code_omitted > 0 {
+        output["unlinked_code_omitted"] = json!(plan.unlinked_code_omitted);
+    }
+    if !plan.unscanned.is_empty() {
+        output["unscanned"] = json!(plan.unscanned);
+    }
+
+    if dry_run {
+        let non_exact = plan.non_exact_sites().len() + plan.unlinked_code_omitted;
+        let unchecked = !plan.unscanned.is_empty();
+        output["apply"] = json!(if !plan.blockers.is_empty() {
+            "would refuse: see blockers".to_string()
+        } else if plan.new_name.is_none() {
+            "pass new_name to preview and apply the edit".to_string()
+        } else if (non_exact > 0 || unchecked) && !allow_heuristic {
+            format!(
+                "would refuse: {non_exact} non-exact site(s){}; the diff shows the exact sites \
+                 only",
+                if unchecked {
+                    ", and files that mention the name could not be checked (see unscanned)"
+                } else {
+                    ""
+                }
+            )
+        } else {
+            "would edit the sites in the diff".to_string()
+        });
+        output["diff"] = json!(plan.file_diffs(allow_heuristic));
+    } else {
+        let outcome = cg.apply_rename(&plan, allow_heuristic).await?;
+        output["applied"] = json!(outcome.applied);
+        if let Some(refused) = &outcome.refused {
+            output["refused"] = json!(refused);
+        }
+        if !outcome.blocking_sites.is_empty() {
+            output["blocking_sites"] = json!(outcome.blocking_sites);
+        }
+        output["files_changed"] = json!(outcome
+            .files_changed
+            .iter()
+            .map(|(file, sites)| json!({ "file": file, "sites": sites }))
+            .collect::<Vec<_>>());
+        if !outcome.skipped.is_empty() {
+            output["skipped"] = json!(outcome.skipped);
+        }
+        if !outcome.warnings.is_empty() {
+            output["apply_warnings"] = json!(outcome.warnings);
+        }
+    }
+
+    let text = super::serialize_bounded_json(&output, &["text_only", "diff", "files"]);
+    Ok(ToolResult {
+        value: json!({ "content": [{ "type": "text", "text": text }] }),
+        touched_files,
+    })
+}

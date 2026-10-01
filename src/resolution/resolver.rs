@@ -216,6 +216,17 @@ fn suppress_go_selector_bare_siblings(resolved: &mut Vec<ResolvedRef>) {
 /// `resolved_by` tag of a `GDScript` call resolved through its receiver's type.
 const GDSCRIPT_TYPED: &str = "gdscript-typed-receiver";
 
+/// `resolved_by` for the trailing segment of a dotted receiver call
+/// (`recv.method`), where nothing is known about the receiver.
+const SIMPLE_NAME_MATCH: &str = "simple-name-match";
+
+/// `resolved_by` for the trailing segment of a `::` path (`module::name`,
+/// `Self::name`) whose full path matched no qualified name. Kept apart from
+/// [`SIMPLE_NAME_MATCH`] (#544): a path names a declaration, while a dotted
+/// receiver may be a value of any type, so the two fallbacks are not equally
+/// trustworthy.
+const PATH_TAIL_MATCH: &str = "path-tail-match";
+
 /// `GDScript` is deliberately absent from [`lang_from_path`]: a `.gd` call into
 /// a godot-cpp method (#269) relies on the cross-language confidence that an
 /// unknown language gets, so the tag would drop those edges.
@@ -677,7 +688,9 @@ impl<'a> ReferenceResolver<'a> {
                 .rsplit("::")
                 .next()
                 .unwrap_or(&uref.reference_name);
-            if let Some(resolved) = self.try_exact_name_match_simple(uref, simple_name, false) {
+            if let Some(resolved) =
+                self.try_exact_name_match_simple(uref, simple_name, false, PATH_TAIL_MATCH)
+            {
                 return Some(resolved);
             }
             return None;
@@ -707,7 +720,9 @@ impl<'a> ReferenceResolver<'a> {
                 .next()
                 .unwrap_or(&uref.reference_name);
             if simple_name != uref.reference_name {
-                if let Some(resolved) = self.try_exact_name_match_simple(uref, simple_name, true) {
+                if let Some(resolved) =
+                    self.try_exact_name_match_simple(uref, simple_name, true, SIMPLE_NAME_MATCH)
+                {
                     return Some(resolved);
                 }
             }
@@ -869,16 +884,41 @@ impl<'a> ReferenceResolver<'a> {
     }
 
     /// Converts a slice of resolved references into graph edges.
+    ///
+    /// Duplicates (same source, target, kind and line) collapse to the one
+    /// with the strongest provenance, which is the row the unique edge index
+    /// then keeps (#544).
     pub fn create_edges(&self, resolved: &[ResolvedRef]) -> Vec<Edge> {
-        resolved
+        let mut edges: Vec<Edge> = resolved
             .iter()
             .map(|r| Edge {
                 source: r.original.from_node_id.clone(),
                 target: r.target_node_id.clone(),
                 kind: r.original.reference_kind,
                 line: Some(r.original.line),
+                resolved_by: ResolvedBy::from_name(&r.resolved_by),
             })
-            .collect()
+            .collect();
+        edges.sort_unstable_by(|a, b| {
+            (
+                &a.source,
+                &a.target,
+                a.kind.as_str(),
+                &a.line,
+                a.provenance_key(),
+            )
+                .cmp(&(
+                    &b.source,
+                    &b.target,
+                    b.kind.as_str(),
+                    &b.line,
+                    b.provenance_key(),
+                ))
+        });
+        edges.dedup_by(|a, b| {
+            a.source == b.source && a.target == b.target && a.kind == b.kind && a.line == b.line
+        });
+        edges
     }
 
     // ------------------------------------------------------------------
@@ -1261,7 +1301,7 @@ impl<'a> ReferenceResolver<'a> {
             original: uref.clone(),
             target_node_id: best.id.clone(),
             confidence: 0.7,
-            resolved_by: "exact-match".to_string(),
+            resolved_by: "exact-match-scored".to_string(),
         })
     }
 
@@ -1270,6 +1310,7 @@ impl<'a> ReferenceResolver<'a> {
         uref: &UnresolvedRef,
         simple_name: &str,
         require_reachable: bool,
+        tag: &str,
     ) -> Option<ResolvedRef> {
         if CROSS_FILE_BLOCKLIST.contains(&simple_name) {
             let candidates = self.name_cache.get(simple_name)?;
@@ -1307,7 +1348,7 @@ impl<'a> ReferenceResolver<'a> {
             return resolve_from_filtered_named(
                 uref,
                 &kind_filtered,
-                "simple-name-match",
+                tag,
                 &self.import_index,
                 require_reachable,
                 &self.node_id_cache,
@@ -1339,7 +1380,7 @@ impl<'a> ReferenceResolver<'a> {
                 original: uref.clone(),
                 target_node_id: candidates[0].id.clone(),
                 confidence,
-                resolved_by: "simple-name-match".to_string(),
+                resolved_by: tag.to_string(),
             });
         }
 
@@ -1352,7 +1393,7 @@ impl<'a> ReferenceResolver<'a> {
             original: uref.clone(),
             target_node_id: best.id.clone(),
             confidence: 0.7,
-            resolved_by: "simple-name-match".to_string(),
+            resolved_by: format!("{tag}-scored"),
         })
     }
 
@@ -1782,6 +1823,6 @@ fn resolve_from_filtered_named(
         original: uref.clone(),
         target_node_id: best.id.clone(),
         confidence: 0.65,
-        resolved_by: resolved_by.to_string(),
+        resolved_by: format!("{resolved_by}-scored"),
     })
 }

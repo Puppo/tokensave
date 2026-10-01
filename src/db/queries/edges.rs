@@ -97,15 +97,18 @@ impl Database {
         }
         self.conn()
             .execute(
-                "INSERT OR IGNORE INTO edges (source, target, kind, line) \
-                 SELECT ?1, ?2, ?3, ?4 \
-                 WHERE EXISTS (SELECT 1 FROM nodes WHERE id = ?1) \
-                   AND EXISTS (SELECT 1 FROM nodes WHERE id = ?2)",
+                &format!(
+                    "INSERT INTO edges (source, target, kind, line, resolved_by) \
+                     SELECT ?1, ?2, ?3, ?4, ?5 \
+                     WHERE EXISTS (SELECT 1 FROM nodes WHERE id = ?1) \
+                       AND EXISTS (SELECT 1 FROM nodes WHERE id = ?2){EDGE_UPSERT_CLAUSE}"
+                ),
                 params![
                     edge.source.as_str(),
                     edge.target.as_str(),
                     edge.kind.as_str(),
-                    edge.line.map(i64::from)
+                    edge.line.map(i64::from),
+                    edge.resolved_by.map(ResolvedBy::code)
                 ],
             )
             .await
@@ -141,12 +144,12 @@ impl Database {
         // when an edge references a node from a not-yet-indexed file.
         let stmt = self
             .conn()
-            .prepare(
-                "INSERT OR IGNORE INTO edges (source, target, kind, line) \
-                 SELECT ?1, ?2, ?3, ?4 \
-                 WHERE EXISTS (SELECT 1 FROM nodes WHERE id = ?1) \
-                   AND EXISTS (SELECT 1 FROM nodes WHERE id = ?2)",
-            )
+            .prepare(&format!(
+                "INSERT INTO edges (source, target, kind, line, resolved_by) \
+                     SELECT ?1, ?2, ?3, ?4, ?5 \
+                     WHERE EXISTS (SELECT 1 FROM nodes WHERE id = ?1) \
+                       AND EXISTS (SELECT 1 FROM nodes WHERE id = ?2){EDGE_UPSERT_CLAUSE}"
+            ))
             .await
             .map_err(|e| TokenSaveError::Database {
                 message: format!("failed to prepare: {e}"),
@@ -179,6 +182,7 @@ impl Database {
                 edge.target.as_str(),
                 edge.kind.as_str(),
                 edge.line.map(i64::from),
+                edge.resolved_by.map(ResolvedBy::code),
             ])
             .await
             .map_err(|e| TokenSaveError::Database {
@@ -211,7 +215,7 @@ impl Database {
             let mut rows = self
                 .conn()
                 .query(
-                    "SELECT source, target, kind, line FROM edges WHERE source = ?1",
+                    "SELECT source, target, kind, line, resolved_by FROM edges WHERE source = ?1",
                     params![source_id],
                 )
                 .await
@@ -228,7 +232,7 @@ impl Database {
                 .map(|(i, _)| format!("?{}", i + 2))
                 .collect();
             let sql = format!(
-                "SELECT source, target, kind, line FROM edges WHERE source = ?1 AND kind IN ({})",
+                "SELECT source, target, kind, line, resolved_by FROM edges WHERE source = ?1 AND kind IN ({})",
                 placeholders.join(", ")
             );
 
@@ -263,7 +267,7 @@ impl Database {
             let mut rows = self
                 .conn()
                 .query(
-                    "SELECT source, target, kind, line FROM edges WHERE target = ?1",
+                    "SELECT source, target, kind, line, resolved_by FROM edges WHERE target = ?1",
                     params![target_id],
                 )
                 .await
@@ -280,7 +284,7 @@ impl Database {
                 .map(|(i, _)| format!("?{}", i + 2))
                 .collect();
             let sql = format!(
-                "SELECT source, target, kind, line FROM edges WHERE target = ?1 AND kind IN ({})",
+                "SELECT source, target, kind, line, resolved_by FROM edges WHERE target = ?1 AND kind IN ({})",
                 placeholders.join(", ")
             );
 
@@ -394,6 +398,7 @@ impl Database {
                 target: trait_method_id.clone(),
                 kind: EdgeKind::Calls,
                 line: (stored_line >= 0).then_some(stored_line as u32),
+                resolved_by: None,
             };
             callers.entry(concrete_method_id).or_default().push((
                 caller,
@@ -453,7 +458,7 @@ impl Database {
 
         let sql = if kinds.is_empty() {
             format!(
-                "SELECT source, target, kind, line FROM edges WHERE target IN ({})",
+                "SELECT source, target, kind, line, resolved_by FROM edges WHERE target IN ({})",
                 target_placeholders.join(", ")
             )
         } else {
@@ -464,7 +469,7 @@ impl Database {
                 param_values.push(libsql::Value::Text(k.as_str().to_string()));
             }
             format!(
-                "SELECT source, target, kind, line FROM edges \
+                "SELECT source, target, kind, line, resolved_by FROM edges \
                  WHERE target IN ({}) AND kind IN ({})",
                 target_placeholders.join(", "),
                 kind_placeholders.join(", ")
@@ -1530,7 +1535,10 @@ impl Database {
     pub async fn get_all_edges(&self) -> Result<Vec<Edge>> {
         let mut rows = self
             .conn()
-            .query("SELECT source, target, kind, line FROM edges", ())
+            .query(
+                "SELECT source, target, kind, line, resolved_by FROM edges",
+                (),
+            )
             .await
             .map_err(|e| TokenSaveError::Database {
                 message: format!("failed to query all edges: {e}"),
@@ -1549,7 +1557,7 @@ impl Database {
         let mut rows = self
             .conn()
             .query(
-                "SELECT source, target, kind, line FROM edges WHERE kind = ?1",
+                "SELECT source, target, kind, line, resolved_by FROM edges WHERE kind = ?1",
                 params![kind.as_str()],
             )
             .await
@@ -1572,7 +1580,7 @@ impl Database {
         }
         let placeholders: Vec<String> = (0..kinds.len()).map(|i| format!("?{}", i + 1)).collect();
         let sql = format!(
-            "SELECT source, target, kind, line FROM edges WHERE kind IN ({})",
+            "SELECT source, target, kind, line, resolved_by FROM edges WHERE kind IN ({})",
             placeholders.join(", ")
         );
         let param_values: Vec<libsql::Value> = kinds
@@ -1689,7 +1697,7 @@ impl Database {
             let placeholders: Vec<String> =
                 (0..chunk.len()).map(|i| format!("?{}", i + 1)).collect();
             let sql = format!(
-                "SELECT source, target, kind, line FROM edges \
+                "SELECT source, target, kind, line, resolved_by FROM edges \
                  WHERE kind = 'calls' AND target IN ({})",
                 placeholders.join(", ")
             );

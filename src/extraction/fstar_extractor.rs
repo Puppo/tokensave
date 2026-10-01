@@ -364,6 +364,7 @@ impl ExtractionState {
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line as u32),
+                resolved_by: None,
             });
         }
         id
@@ -384,6 +385,7 @@ impl ExtractionState {
             target: target_id,
             kind: EdgeKind::Uses,
             line: Some(line as u32),
+            resolved_by: None,
         });
     }
 }
@@ -743,6 +745,7 @@ fn emit_child(
         target: id,
         kind: EdgeKind::Contains,
         line: Some(line as u32),
+        resolved_by: None,
     });
 }
 

@@ -210,6 +210,49 @@ impl Database {
         Ok(out)
     }
 
+    /// The raw references recorded from any of `source_ids`, with their
+    /// columns.
+    ///
+    /// The edge a reference resolved to keeps only its line; the column lives
+    /// here. `tokensave_rename` reads it back to find which identifier on the
+    /// line an edge came from. Batched to stay under `SQLite`'s bound
+    /// parameter limit.
+    pub async fn get_unresolved_refs_for_sources(
+        &self,
+        source_ids: &[String],
+    ) -> Result<Vec<UnresolvedRef>> {
+        let mut out = Vec::new();
+        for chunk in source_ids.chunks(500) {
+            let placeholders: Vec<String> = (1..=chunk.len()).map(|i| format!("?{i}")).collect();
+            let sql = format!(
+                "SELECT from_node_id, reference_name, reference_kind, line, col, file_path
+                 FROM unresolved_refs WHERE from_node_id IN ({})",
+                placeholders.join(", ")
+            );
+            let values: Vec<libsql::Value> = chunk
+                .iter()
+                .map(|id| libsql::Value::Text(id.clone()))
+                .collect();
+            let mut rows = self
+                .conn()
+                .query(&sql, libsql::params_from_iter(values))
+                .await
+                .map_err(|e| TokenSaveError::Database {
+                    message: format!("failed to query unresolved refs by source: {e}"),
+                    operation: "get_unresolved_refs_for_sources".to_string(),
+                })?;
+            out.extend(
+                collect_rows(
+                    &mut rows,
+                    row_to_unresolved_ref,
+                    "get_unresolved_refs_for_sources",
+                )
+                .await?,
+            );
+        }
+        Ok(out)
+    }
+
     /// Removes all unresolved references.
     pub async fn clear_unresolved_refs(&self) -> Result<()> {
         self.conn()

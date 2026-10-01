@@ -118,6 +118,7 @@ impl CanvasExtractor {
                         target: id.clone(),
                         kind: EdgeKind::Contains,
                         line: Some(line),
+                        resolved_by: None,
                     });
                     card_ids.push((card_id.to_string(), id));
                 }
@@ -146,6 +147,7 @@ impl CanvasExtractor {
                         target: id.clone(),
                         kind: EdgeKind::Contains,
                         line: Some(line),
+                        resolved_by: None,
                     });
                     card_ids.push((card_id.to_string(), id));
                 }
@@ -168,6 +170,7 @@ impl CanvasExtractor {
                         target: target_id,
                         kind: EdgeKind::Uses,
                         line: Some(line),
+                        resolved_by: None,
                     });
                 }
                 // `link` cards point outside the vault; anything else is a
@@ -219,6 +222,7 @@ impl CanvasExtractor {
                 target: target_id.to_string(),
                 kind: EdgeKind::Uses,
                 line: Some(line),
+                resolved_by: None,
             });
         }
     }

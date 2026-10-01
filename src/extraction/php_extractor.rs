@@ -174,6 +174,7 @@ impl PhpExtractor {
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 
@@ -240,6 +241,7 @@ impl PhpExtractor {
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 
@@ -305,6 +307,7 @@ impl PhpExtractor {
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 
@@ -377,6 +380,7 @@ impl PhpExtractor {
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 
@@ -443,6 +447,7 @@ impl PhpExtractor {
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 
@@ -509,6 +514,7 @@ impl PhpExtractor {
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 
@@ -591,6 +597,7 @@ impl PhpExtractor {
                 target: id,
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
     }
@@ -647,6 +654,7 @@ impl PhpExtractor {
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 
@@ -770,6 +778,7 @@ impl PhpExtractor {
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 
@@ -851,6 +860,7 @@ impl PhpExtractor {
                 target: id,
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
     }
@@ -920,6 +930,7 @@ impl PhpExtractor {
                             target: id.clone(),
                             kind: EdgeKind::Contains,
                             line: Some(start_line),
+                            resolved_by: None,
                         });
                     }
 
@@ -1279,6 +1290,7 @@ impl PhpExtractor {
                                     target: target_id.to_string(),
                                     kind: EdgeKind::Annotates,
                                     line: Some(start_line),
+                                    resolved_by: None,
                                 });
                             }
                             if !inner.goto_next_sibling() {

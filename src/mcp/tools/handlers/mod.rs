@@ -524,7 +524,8 @@ pub async fn handle_tool_call_with_session(
         "tokensave_imports" => analysis::handle_imports(cg, args).await,
         "tokensave_hotspots" => analysis::handle_hotspots(cg, args, scope_prefix).await,
         "tokensave_similar" => graph::handle_similar(cg, args).await,
-        "tokensave_rename_preview" => graph::handle_rename_preview(cg, args).await,
+        "tokensave_rename_preview" => edit::handle_rename_preview(cg, args).await,
+        "tokensave_rename" => edit::handle_rename(cg, args).await,
         "tokensave_unused_imports" => analysis::handle_unused_imports(cg, args, scope_prefix).await,
         "tokensave_rank" => analysis::handle_rank(cg, args, scope_prefix).await,
         "tokensave_largest" => analysis::handle_largest(cg, args, scope_prefix).await,
@@ -734,9 +735,9 @@ mod tests {
         // tool that will instantly fail. The count and the per-tool checks
         // below adapt to the host's capability set.
         let expected_total = if super::super::definitions::ast_grep_available() {
-            87
+            88
         } else {
-            86
+            87
         };
         assert_eq!(tools.len(), expected_total);
 
@@ -767,6 +768,7 @@ mod tests {
         assert!(tool_names.contains(&"tokensave_hotspots"));
         assert!(tool_names.contains(&"tokensave_similar"));
         assert!(tool_names.contains(&"tokensave_rename_preview"));
+        assert!(tool_names.contains(&"tokensave_rename"));
         assert!(tool_names.contains(&"tokensave_unused_imports"));
         assert!(tool_names.contains(&"tokensave_changelog"));
         assert!(tool_names.contains(&"tokensave_rank"));
@@ -861,6 +863,7 @@ mod tests {
             "tokensave_run_affected_tests",
             "tokensave_delete_symbol",
             "tokensave_replace_lines",
+            "tokensave_rename",
         ];
         for tool in &tools {
             let ann = tool

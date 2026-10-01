@@ -505,6 +505,16 @@ impl Database {
         collect_rows(&mut rows, row_to_node, "search_nodes_by_exact_name").await
     }
 
+    /// Returns `true` if the error is a failed schema migration (see
+    /// [`crate::db::migrations::MIGRATION_FAILED`]).
+    pub fn is_migration_error(e: &TokenSaveError) -> bool {
+        matches!(
+            e,
+            TokenSaveError::Database { operation, .. }
+                if operation == crate::db::migrations::MIGRATION_FAILED
+        )
+    }
+
     /// Returns `true` if the error indicates `SQLite` database corruption.
     pub fn is_corruption_error(e: &TokenSaveError) -> bool {
         match e {

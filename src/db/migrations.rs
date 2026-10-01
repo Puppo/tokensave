@@ -15,7 +15,7 @@ use crate::errors::{Result, TokenSaveError};
 
 /// The highest migration version defined in this file. Bump this and add a
 /// new entry to `run_migration` whenever the schema changes.
-const LATEST_VERSION: u32 = 17;
+const LATEST_VERSION: u32 = 18;
 
 /// Schema for the ambiguity record added in v17 (#412). Used by both
 /// `migrate_v17` and the fresh-schema path, which never replays migrations.
@@ -175,6 +175,7 @@ pub async fn create_schema(conn: &Connection) -> Result<()> {
             target TEXT NOT NULL,
             kind TEXT NOT NULL,
             line INTEGER,
+            resolved_by INTEGER,
             FOREIGN KEY (source) REFERENCES nodes(id) ON DELETE CASCADE,
             FOREIGN KEY (target) REFERENCES nodes(id) ON DELETE CASCADE
         );
@@ -401,7 +402,7 @@ pub async fn migrate(conn: &Connection) -> Result<bool> {
         .await
         .map_err(|e| TokenSaveError::Database {
             message: format!("failed to acquire exclusive lock: {e}"),
-            operation: "migrate".to_string(),
+            operation: "migrate_lock".to_string(),
         })?;
 
     // Re-read inside the lock in case another process migrated between our
@@ -416,15 +417,72 @@ pub async fn migrate(conn: &Connection) -> Result<bool> {
                 .await
                 .map_err(|e| TokenSaveError::Database {
                     message: format!("failed to commit migrations: {e}"),
-                    operation: "migrate".to_string(),
+                    operation: "migrate_commit".to_string(),
                 })?;
             Ok(true)
         }
         Err(e) => {
             let _ = conn.execute("ROLLBACK", ()).await;
-            Err(e)
+            // A busy, locked, full or failing disk is not a broken schema: the
+            // same migration succeeds once the condition clears, and the data
+            // must not be thrown away for it. Those keep their own error.
+            if is_environmental_error(&e) {
+                return Err(TokenSaveError::Database {
+                    message: format!(
+                        "schema migration v{current} → v{LATEST_VERSION} could not run ({e}). \
+                         Retry once no other tokensave process is using the index and the \
+                         disk has room."
+                    ),
+                    operation: "migrate_environment".to_string(),
+                });
+            }
+            // The transaction rolled back, so the database is still the old
+            // version and every later open fails the same way. Say how out:
+            // `sync --force` rebuilds a database whose migration fails.
+            Err(TokenSaveError::Database {
+                message: format!(
+                    "schema migration v{current} → v{LATEST_VERSION} failed ({e}). \
+                     Run `tokensave sync --force` to rebuild the index."
+                ),
+                operation: MIGRATION_FAILED.to_string(),
+            })
         }
     }
+}
+
+/// `operation` of the error [`migrate`] returns when a migration step itself
+/// fails, and only then. Taking the lock, committing, and a step that fails
+/// for an environmental reason (see [`is_environmental_error`]) report other
+/// operations, because `sync --force` deletes and rebuilds a database whose
+/// error carries this one.
+pub const MIGRATION_FAILED: &str = "migrate_schema";
+
+/// True for an error caused by the database's surroundings rather than its
+/// content: another connection holding a lock, a full disk, an I/O failure,
+/// a read-only file. Retrying later is the remedy; rebuilding is not.
+#[must_use]
+pub fn is_environmental_error(e: &TokenSaveError) -> bool {
+    let message = match e {
+        TokenSaveError::Database { message, .. } => message.to_ascii_lowercase(),
+        _ => return false,
+    };
+    [
+        "database is locked",
+        "database is busy",
+        "database table is locked",
+        "misuse",
+        "disk i/o",
+        "i/o error",
+        "disk is full",
+        "database or disk is full",
+        "no space",
+        "readonly",
+        "read-only",
+        "unable to open",
+        "interrupted",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
 }
 
 /// Applies migrations sequentially from `current` up to `LATEST_VERSION`.
@@ -460,6 +518,7 @@ async fn run_migration(conn: &Connection, version: u32) -> Result<()> {
         15 => migrate_v15(conn).await,
         16 => migrate_v16(conn).await,
         17 => migrate_v17(conn).await,
+        18 => migrate_v18(conn).await,
         _ => Err(TokenSaveError::Database {
             message: format!("unknown migration version: {version}"),
             operation: "run_migration".to_string(),
@@ -1590,6 +1649,31 @@ async fn migrate_v17(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Names of the explicit indexes on `table` whose definition mentions
+/// `column`.
+async fn indexes_naming(conn: &Connection, table: &str, column: &str) -> Result<Vec<String>> {
+    let mut rows = conn
+        .query(
+            // `instr`, not `LIKE`: `_` in a column name is a LIKE wildcard.
+            "SELECT name FROM sqlite_master
+             WHERE type = 'index' AND tbl_name = ?1 AND sql IS NOT NULL AND instr(sql, ?2) > 0",
+            params![table, column],
+        )
+        .await
+        .map_err(|e| TokenSaveError::Database {
+            message: format!("failed to list indexes on {table}: {e}"),
+            operation: "indexes_naming".to_string(),
+        })?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next().await.map_err(|e| TokenSaveError::Database {
+        message: format!("failed to read index row: {e}"),
+        operation: "indexes_naming".to_string(),
+    })? {
+        out.push(row.get::<String>(0).unwrap_or_default());
+    }
+    Ok(out)
+}
+
 /// Returns the column names of `table` via `PRAGMA table_info`.
 async fn table_columns(conn: &Connection, table: &str) -> Result<Vec<String>> {
     // PRAGMA does not accept a bound parameter for the table name, and this is
@@ -1614,4 +1698,85 @@ async fn table_columns(conn: &Connection, table: &str) -> Result<Vec<String>> {
         cols.push(name);
     }
     Ok(cols)
+}
+
+/// v18: persists resolution provenance on edges (#544).
+///
+/// The resolver has always decided *how* it bound each reference
+/// (`exact-match`, `qualified-match`, `simple-name-match`, …) and then thrown
+/// the answer away. `tokensave_rename` needs it to tell a site it can edit
+/// from one it can only list, and it turns "how much of the graph rests on
+/// the bare-name fallback" into a `GROUP BY`.
+///
+/// The column is a nullable small integer (see [`crate::types::ResolvedBy`]),
+/// not text: the edges table is the largest in the database, and a code of
+/// 1–127 costs one byte per row where `'simple-name-match'` would cost 17.
+///
+/// Databases that went through the 5.0-beta v8 migration (91ad260) carry a
+/// leftover `resolved_by TEXT NOT NULL DEFAULT 'direct'` column, indexed by
+/// `idx_edges_resolved_by`, that nothing has maintained since. It is dropped
+/// and re-added rather than reused: its `NOT NULL` rejects the NULL written
+/// for extractor edges, and its TEXT affinity would turn every stored code
+/// into a string. `DROP COLUMN` refuses a column an index still names, so
+/// every index on `edges` that mentions the column is dropped first.
+///
+/// Existing rows read NULL until they are re-indexed; `TokenSave::open`
+/// forces a full index after any migration.
+async fn migrate_v18(conn: &Connection) -> Result<()> {
+    if !table_exists(conn, "edges").await? {
+        return Ok(());
+    }
+    let mut legacy = false;
+    let mut current = false;
+    let mut rows = conn
+        .query("PRAGMA table_info(edges)", ())
+        .await
+        .map_err(|e| TokenSaveError::Database {
+            message: format!("v18: failed to read edges table_info: {e}"),
+            operation: "migrate_v18".to_string(),
+        })?;
+    while let Some(row) = rows.next().await.map_err(|e| TokenSaveError::Database {
+        message: format!("v18: failed to read table_info row: {e}"),
+        operation: "migrate_v18".to_string(),
+    })? {
+        // PRAGMA table_info columns: cid(0), name(1), type(2), notnull(3), ...
+        let name: String = row.get(1).unwrap_or_default();
+        if name != "resolved_by" {
+            continue;
+        }
+        let ty: String = row.get(2).unwrap_or_default();
+        let not_null: i64 = row.get(3).unwrap_or(0);
+        if ty.eq_ignore_ascii_case("INTEGER") && not_null == 0 {
+            current = true;
+        } else {
+            legacy = true;
+        }
+    }
+    drop(rows);
+    if current {
+        return Ok(());
+    }
+    if legacy {
+        for index in indexes_naming(conn, "edges", "resolved_by").await? {
+            conn.execute_batch(&format!("DROP INDEX IF EXISTS \"{index}\";"))
+                .await
+                .map_err(|e| TokenSaveError::Database {
+                    message: format!("v18: failed to drop index {index}: {e}"),
+                    operation: "migrate_v18".to_string(),
+                })?;
+        }
+        conn.execute_batch("ALTER TABLE edges DROP COLUMN resolved_by;")
+            .await
+            .map_err(|e| TokenSaveError::Database {
+                message: format!("v18: failed to drop legacy edges.resolved_by: {e}"),
+                operation: "migrate_v18".to_string(),
+            })?;
+    }
+    conn.execute_batch("ALTER TABLE edges ADD COLUMN resolved_by INTEGER;")
+        .await
+        .map_err(|e| TokenSaveError::Database {
+            message: format!("v18: failed to add edges.resolved_by: {e}"),
+            operation: "migrate_v18".to_string(),
+        })?;
+    Ok(())
 }

@@ -1612,6 +1612,7 @@ fn calls_edge(from: &str, to: &str) -> Edge {
         target: to.to_string(),
         kind: EdgeKind::Calls,
         line: Some(1),
+        resolved_by: None,
     }
 }
 
@@ -1662,12 +1663,14 @@ fn test_variant_fanout_rust_cfg() {
             target: "fn:macos".into(),
             kind: EdgeKind::Annotates,
             line: Some(1),
+            resolved_by: None,
         },
         Edge {
             source: "au:2".into(),
             target: "fn:other".into(),
             kind: EdgeKind::Annotates,
             line: Some(1),
+            resolved_by: None,
         },
         calls_edge("fn:caller", "fn:macos"),
     ];
@@ -1815,12 +1818,14 @@ fn propagate_variant_edges_ignores_every_kind_but_annotates_and_calls() {
             target: "fn:macos".into(),
             kind: EdgeKind::Annotates,
             line: Some(1),
+            resolved_by: None,
         },
         Edge {
             source: "au:2".into(),
             target: "fn:other".into(),
             kind: EdgeKind::Annotates,
             line: Some(1),
+            resolved_by: None,
         },
         calls_edge("fn:caller", "fn:macos"),
     ];
@@ -1845,6 +1850,7 @@ fn propagate_variant_edges_ignores_every_kind_but_annotates_and_calls() {
         target: "fn:third".into(),
         kind,
         line: Some(7),
+        resolved_by: None,
     })
     .collect();
 

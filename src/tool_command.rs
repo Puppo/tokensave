@@ -469,6 +469,7 @@ fn group_for(def: &ToolDefinition) -> &'static str {
         || n == "tokensave_ast_grep_rewrite"
         || n == "tokensave_replace_symbol"
         || n == "tokensave_insert_at_symbol"
+        || n == "tokensave_rename"
     {
         "edit"
     } else if n == "tokensave_record_decision"

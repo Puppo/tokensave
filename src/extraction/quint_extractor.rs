@@ -282,6 +282,7 @@ impl QuintExtractor {
             target: target_id,
             kind: EdgeKind::Uses,
             line: Some(line),
+            resolved_by: None,
         });
     }
 
@@ -350,6 +351,7 @@ impl QuintExtractor {
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 

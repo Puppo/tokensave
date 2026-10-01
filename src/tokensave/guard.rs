@@ -52,6 +52,43 @@ pub(crate) fn sync_in_progress(project_root: &Path) -> bool {
 }
 
 /// Deletes the database and its WAL/SHM sidecars.
+/// Takes the project's sync lock for a destructive rebuild of `db_path`, or
+/// says why the rebuild must not happen.
+///
+/// A rebuild deletes the database file. Another tokensave process that has
+/// it open (a running `serve`, a sync, a hook) would keep reading and writing
+/// the unlinked inode while this process builds a new one, so the rebuild is
+/// refused while the sync lock is held or a registered server serves this
+/// project or database.
+pub(crate) fn rebuild_refusal(
+    project_root: &std::path::Path,
+    db_path: &std::path::Path,
+) -> std::result::Result<SyncLockGuard, String> {
+    let lock = try_acquire_sync_lock(project_root)
+        .map_err(|e| format!("{e}. Stop the other tokensave process and run the command again."))?;
+    let canonical = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.into());
+    let db = canonical(db_path);
+    let root = canonical(project_root);
+    let me = std::process::id();
+    let holders: Vec<String> = crate::servers::reap()
+        .into_iter()
+        .filter(|s| s.pid != me)
+        .filter(|s| {
+            canonical(std::path::Path::new(&s.db_path)) == db
+                || canonical(std::path::Path::new(&s.project_path)) == root
+        })
+        .map(|s| s.pid.to_string())
+        .collect();
+    if !holders.is_empty() {
+        return Err(format!(
+            "a tokensave server (PID {}) is serving this project. Stop it (see `tokensave \
+             servers`) and run the command again.",
+            holders.join(", ")
+        ));
+    }
+    Ok(lock)
+}
+
 pub(crate) fn delete_db_files(db_path: &std::path::Path) {
     let _ = std::fs::remove_file(db_path);
     // WAL and SHM files use the same base name with different extensions

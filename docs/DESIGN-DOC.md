@@ -299,7 +299,7 @@ see the README tool tables or `tokensave tool` for the full list):
 | Metrics         | rank, hotspots, largest, distribution, inheritance_depth |
 | Quality         | doc_coverage, unused_imports, recursion                  |
 | Health          | health, gini, dsm, dependency_depth, test_risk           |
-| Refactoring     | rename_preview, similar, module_api                      |
+| Refactoring     | rename, similar, module_api                              |
 | Edit primitives | str_replace, multi_str_replace, insert_at                |
 | Git/CI          | changelog, commit_context, pr_context                    |
 | Testing         | simplify_scan, test_map, test_coverage, type_hierarchy   |

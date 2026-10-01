@@ -247,6 +247,7 @@ impl LeanExtractor {
             target: target_id,
             kind: EdgeKind::Uses,
             line: Some(node.start_position().row as u32),
+            resolved_by: None,
         });
     }
 
@@ -329,6 +330,7 @@ impl LeanExtractor {
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 

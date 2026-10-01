@@ -1339,6 +1339,7 @@ async fn test_context_surfaces_asset_generator_over_generic_ui_decoys() {
             target: format!("function:generator{i}"),
             kind: EdgeKind::Calls,
             line: Some(2),
+            resolved_by: None,
         })
         .await
         .unwrap();

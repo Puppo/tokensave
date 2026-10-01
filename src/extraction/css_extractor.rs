@@ -122,6 +122,7 @@ impl State {
             target: id,
             kind: EdgeKind::Contains,
             line: Some(start_line),
+            resolved_by: None,
         });
     }
 }

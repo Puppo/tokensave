@@ -56,7 +56,7 @@ The JSON storage choice is significant. JSON doesn't support indexed queries, FT
 | Type system | `type_hierarchy`, `inheritance_depth` |
 | Git-aware | `commit_context`, `pr_context`, `diff_context`, `changelog` |
 | Rankings | `rank`, `hotspots`, `largest`, `distribution` |
-| Refactoring | `rename_preview`, `similar` |
+| Refactoring | `rename`, `similar` |
 | Testing | `test_map` |
 | Structure | `circular`, `recursion`, `doc_coverage` |
 | Porting | `port_status`, `port_order` |
@@ -73,7 +73,7 @@ The JSON storage choice is significant. JSON doesn't support indexed queries, FT
 | `count_tokens` | Estimate token count of a string |
 | `get_session_stats` | Session cost metrics |
 
-tokensave has ~7x more tools, and critically, they are specialized. "What breaks if I rename this function?" is one tool call with `rename_preview`. In Dual-Graph, that question can't be answered -- there's no call graph to traverse.
+tokensave has ~7x more tools, and critically, they are specialized. "What breaks if I rename this function?" is one tool call with `rename` (a dry run by default). In Dual-Graph, that question can't be answered -- there's no call graph to traverse.
 
 ---
 
@@ -365,7 +365,7 @@ Both tools are local-only with no cloud dependency. code-review-graph's `watch` 
 | Discovery | `context`, `search`, `node`, `files`, `module_api` | `semantic_search_nodes_tool`, `query_graph_tool`, `get_docs_section_tool` |
 | Impact analysis | `callers`, `callees`, `impact`, `affected` | `get_impact_radius_tool`, `get_review_context_tool`, `detect_changes_tool` |
 | Quality analysis | `complexity`, `dead_code`, `god_class`, `coupling`, `simplify_scan`, `unused_imports` | `find_large_functions_tool` |
-| Refactoring | `rename_preview`, `similar` | `refactor_tool`, `apply_refactor_tool` |
+| Refactoring | `rename`, `similar` | `refactor_tool`, `apply_refactor_tool` |
 | Type system | `type_hierarchy`, `inheritance_depth` | -- |
 | Git-aware | `commit_context`, `pr_context`, `diff_context`, `changelog` | `detect_changes_tool` (risk-scored) |
 | Testing | `test_map` | (test edges in graph, no dedicated tool) |
@@ -408,7 +408,7 @@ Five pre-built prompt templates (`review_changes`, `architecture_map`, `debug_is
 
 #### Apply refactoring
 
-`apply_refactor_tool` can execute rename refactorings, not just preview them. tokensave's `rename_preview` shows what would change but doesn't write the changes -- it leaves that to the AI.
+`apply_refactor_tool` can execute rename refactorings. tokensave's `rename` can too, but it is graph-based rather than binding-aware: it classifies every site by how the resolver bound it and edits only exact sites unless told otherwise.
 
 #### Risk-scored change detection
 
@@ -565,7 +565,7 @@ OpenWolf has no code understanding. It knows files exist and how big they are, b
 | Semantic code graph | Yes (41K+ nodes, 88K+ edges) | No |
 | Call graph traversal | `callers`, `callees`, `impact`, `affected` | No |
 | Quality analysis | `complexity`, `dead_code`, `god_class`, `coupling` | No |
-| Refactoring support | `rename_preview`, `similar` | No |
+| Refactoring support | `rename`, `similar` | No |
 | Git-aware context | `commit_context`, `pr_context`, `diff_context` | No |
 | Multi-branch indexing | Optional per-branch DBs with cross-branch diff | No |
 | Language-specific extraction | 60 languages with deep tree-sitter parsing | Language-agnostic file listing |

@@ -221,6 +221,7 @@ impl PythonExtractor {
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 
@@ -407,6 +408,7 @@ impl PythonExtractor {
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 
@@ -547,6 +549,7 @@ impl PythonExtractor {
                             target: target_id,
                             kind: EdgeKind::Annotates,
                             line: Some(start_line),
+                            resolved_by: None,
                         });
                     }
                 }
@@ -730,6 +733,7 @@ impl PythonExtractor {
                 target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
+                resolved_by: None,
             });
         }
 
@@ -807,6 +811,7 @@ impl PythonExtractor {
                         target: id.clone(),
                         kind: EdgeKind::Contains,
                         line: Some(start_line),
+                        resolved_by: None,
                     });
                 }
                 const_id = Some(id);

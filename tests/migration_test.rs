@@ -1459,3 +1459,233 @@ async fn test_migrate_v15_partial_schema_does_not_error() {
     assert!(!index_exists(&conn, "idx_nodes_parent_id").await);
     assert!(!index_exists(&conn, "idx_edges_source_kind").await);
 }
+
+/// `(type, notnull)` of `edges.resolved_by`, or `None` when it is absent.
+async fn resolved_by_column(conn: &Connection) -> Option<(String, i64)> {
+    let mut rows = conn
+        .query("PRAGMA table_info(edges)", ())
+        .await
+        .expect("table_info");
+    while let Some(row) = rows.next().await.expect("table_info row") {
+        let name: String = row.get(1).expect("name");
+        if name == "resolved_by" {
+            return Some((row.get(2).expect("type"), row.get(3).expect("notnull")));
+        }
+    }
+    None
+}
+
+/// Inserts two nodes, `a` and `b`, if missing.
+async fn insert_node_pair(conn: &Connection) {
+    for id in ["a", "b"] {
+        conn.execute(
+            &format!(
+                "INSERT OR IGNORE INTO nodes (id, kind, name, qualified_name, file_path, start_line, \
+                 end_line, start_column, end_column, updated_at) \
+                 VALUES ('{id}', 'function', '{id}', '{id}', 'x.rs', 0, 0, 0, 0, 0)"
+            ),
+            (),
+        )
+        .await
+        .expect("insert node");
+    }
+}
+
+/// Inserts an `a -> b` edge with the given `resolved_by` SQL literal.
+async fn insert_edge_with(conn: &Connection, resolved_by: &str) {
+    insert_node_pair(conn).await;
+    conn.execute(
+        &format!(
+            "INSERT INTO edges (source, target, kind, line, resolved_by) \
+             VALUES ('a', 'b', 'calls', 1, {resolved_by})"
+        ),
+        (),
+    )
+    .await
+    .expect("insert edge");
+}
+
+/// A fresh schema carries the v18 column: nullable INTEGER.
+#[tokio::test]
+async fn test_fresh_schema_has_integer_resolved_by() {
+    let (_dir, conn, _db) = create_raw_db().await;
+    create_schema(&conn).await.expect("create_schema");
+    assert_eq!(
+        resolved_by_column(&conn).await,
+        Some(("INTEGER".to_string(), 0))
+    );
+    insert_edge_with(&conn, "NULL").await;
+}
+
+/// V18 adds `edges.resolved_by` to a v17 database that lacks it, leaving the
+/// existing rows NULL.
+#[tokio::test]
+async fn test_migrate_v18_adds_resolved_by() {
+    let (_dir, conn, _db) = create_raw_db().await;
+    create_schema(&conn).await.expect("create_schema");
+    conn.execute_batch("ALTER TABLE edges DROP COLUMN resolved_by;")
+        .await
+        .expect("simulate a v17 edges table");
+    assert_eq!(resolved_by_column(&conn).await, None);
+    insert_node_pair(&conn).await;
+    conn.execute(
+        "INSERT INTO edges (source, target, kind, line) VALUES ('a', 'b', 'calls', 1)",
+        (),
+    )
+    .await
+    .expect("insert v17 edge");
+    set_user_version(&conn, 17).await;
+
+    assert!(migrate(&conn).await.expect("v18 migration"));
+    assert_eq!(get_user_version(&conn).await, latest_version());
+    assert_eq!(
+        resolved_by_column(&conn).await,
+        Some(("INTEGER".to_string(), 0))
+    );
+    let mut rows = conn
+        .query("SELECT resolved_by FROM edges", ())
+        .await
+        .expect("select");
+    let row = rows.next().await.expect("row").expect("one edge");
+    assert_eq!(row.get::<Option<i64>>(0).expect("value"), None);
+}
+
+/// V18 replaces the leftover `resolved_by TEXT NOT NULL DEFAULT 'direct'`
+/// column the 5.0-beta v8 migration added, which would reject NULL and
+/// stringify codes. That migration also indexed it, and `DROP COLUMN`
+/// refuses an indexed column, so the fixture carries the index too.
+#[tokio::test]
+async fn test_migrate_v18_replaces_legacy_text_column() {
+    let (_dir, conn, _db) = create_raw_db().await;
+    create_schema(&conn).await.expect("create_schema");
+    conn.execute_batch(
+        "ALTER TABLE edges DROP COLUMN resolved_by;
+         ALTER TABLE edges ADD COLUMN resolved_by TEXT NOT NULL DEFAULT 'direct';
+         CREATE INDEX idx_edges_resolved_by ON edges(resolved_by);",
+    )
+    .await
+    .expect("simulate the legacy column");
+    insert_edge_with(&conn, "'direct'").await;
+    set_user_version(&conn, 17).await;
+
+    assert!(migrate(&conn).await.expect("v18 migration"));
+    assert_eq!(get_user_version(&conn).await, latest_version());
+    assert_eq!(
+        resolved_by_column(&conn).await,
+        Some(("INTEGER".to_string(), 0))
+    );
+    assert!(!index_exists(&conn, "idx_edges_resolved_by").await);
+    // The legacy value is gone, NULL is accepted, and a code stays an integer.
+    conn.execute("DELETE FROM edges", ()).await.expect("clear");
+    insert_edge_with(&conn, "NULL").await;
+    conn.execute("UPDATE edges SET resolved_by = 3", ())
+        .await
+        .expect("update");
+    let mut rows = conn
+        .query("SELECT typeof(resolved_by) FROM edges", ())
+        .await
+        .expect("select");
+    let row = rows.next().await.expect("row").expect("one edge");
+    assert_eq!(row.get::<String>(0).expect("typeof"), "integer");
+}
+
+/// A database whose column is already the v18 shape is left alone.
+#[tokio::test]
+async fn test_migrate_v18_is_idempotent() {
+    let (_dir, conn, _db) = create_raw_db().await;
+    create_schema(&conn).await.expect("create_schema");
+    set_user_version(&conn, 17).await;
+    assert!(migrate(&conn).await.expect("v18 on an up-to-date column"));
+    assert_eq!(
+        resolved_by_column(&conn).await,
+        Some(("INTEGER".to_string(), 0))
+    );
+}
+
+/// A failed migration names the way out, and `sync --force`'s open rebuilds
+/// the database instead of failing the same way again.
+#[tokio::test]
+async fn test_failed_migration_is_recoverable_by_a_forced_rebuild() {
+    use tokensave::tokensave::TokenSave;
+    let dir = TempDir::new().expect("temp dir");
+    std::fs::write(
+        dir.path().join("lib.rs"),
+        "pub fn f() {}\npub fn g() { f() }\n",
+    )
+    .expect("write source");
+    let cg = TokenSave::init(dir.path()).await.expect("init");
+    cg.index_all().await.expect("index");
+    drop(cg);
+
+    // Make v18 fail: a legacy column that a view depends on cannot be dropped.
+    let db_path = dir.path().join(".tokensave/tokensave.db");
+    {
+        let db = Builder::new_local(&db_path).build().await.expect("db");
+        let conn = db.connect().expect("conn");
+        conn.execute_batch(
+            "ALTER TABLE edges DROP COLUMN resolved_by;
+             ALTER TABLE edges ADD COLUMN resolved_by TEXT NOT NULL DEFAULT 'direct';
+             CREATE VIEW legacy_provenance AS SELECT resolved_by FROM edges;
+             PRAGMA user_version = 17;",
+        )
+        .await
+        .expect("simulate a v17 database whose migration fails");
+    }
+
+    let err = match TokenSave::open(dir.path()).await {
+        Ok(_) => panic!("the migration should fail"),
+        Err(e) => e.to_string(),
+    };
+    assert!(err.contains("tokensave sync --force"), "{err}");
+
+    let cg = TokenSave::open_rebuilding_failed_migration(dir.path())
+        .await
+        .expect("a forced rebuild recovers");
+    assert!(!cg.get_nodes_by_name("f").await.expect("query").is_empty());
+}
+
+/// A failed migration is not rebuilt while another tokensave process holds
+/// the project's sync lock: deleting the database under it would leave that
+/// process writing to an unlinked file.
+#[tokio::test]
+async fn test_forced_rebuild_is_refused_while_the_sync_lock_is_held() {
+    use tokensave::tokensave::TokenSave;
+    let dir = TempDir::new().expect("temp dir");
+    std::fs::write(dir.path().join("lib.rs"), "pub fn f() {}\n").expect("write source");
+    let cg = TokenSave::init(dir.path()).await.expect("init");
+    cg.index_all().await.expect("index");
+    drop(cg);
+
+    let db_path = dir.path().join(".tokensave/tokensave.db");
+    {
+        let db = Builder::new_local(&db_path).build().await.expect("db");
+        let conn = db.connect().expect("conn");
+        conn.execute_batch(
+            "ALTER TABLE edges DROP COLUMN resolved_by;
+             ALTER TABLE edges ADD COLUMN resolved_by TEXT NOT NULL DEFAULT 'direct';
+             CREATE VIEW legacy_provenance AS SELECT resolved_by FROM edges;
+             PRAGMA user_version = 17;",
+        )
+        .await
+        .expect("simulate a v17 database whose migration fails");
+    }
+    let before = std::fs::read(&db_path).expect("read db");
+
+    // A live process (this one) holds the sync lock.
+    let lock = dir.path().join(".tokensave/sync.lock");
+    std::fs::write(&lock, std::process::id().to_string()).expect("write lock");
+
+    let err = match TokenSave::open_rebuilding_failed_migration(dir.path()).await {
+        Ok(_) => panic!("the rebuild must be refused"),
+        Err(e) => e.to_string(),
+    };
+    assert!(err.contains("Not rebuilding the database"), "{err}");
+    assert_eq!(std::fs::read(&db_path).expect("read db"), before);
+
+    // Once the lock is gone the same call rebuilds.
+    std::fs::remove_file(&lock).expect("release lock");
+    let cg = TokenSave::open_rebuilding_failed_migration(dir.path())
+        .await
+        .expect("rebuild");
+    assert!(!cg.get_nodes_by_name("f").await.expect("query").is_empty());
+}

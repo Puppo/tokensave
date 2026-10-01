@@ -25,7 +25,7 @@ use super::graph_scope::{
 };
 use super::tools::{
     baseline_policy, cap_baseline, get_always_load_tool_definitions, get_listed_tool_definitions,
-    get_tool_definitions, handle_tool_call_with_session, is_graph_scoped_tool,
+    get_tool_definitions, handle_tool_call_with_session, is_graph_scoped_tool, is_hidden_tool,
     is_selectorless_local_graph_tool, is_tool_area, request_overhead_tokens,
     schema_overhead_tokens, settle_session_debt, tool_area, SessionState, CORE_TOOLS, MORE_TOOL,
     TOOL_AREAS,
@@ -2119,6 +2119,7 @@ impl McpServer {
             }
             let names: Vec<String> = get_tool_definitions()
                 .into_iter()
+                .filter(|definition| !is_hidden_tool(definition))
                 .map(|definition| definition.name)
                 .filter(|name| !CORE_TOOLS.contains(&name.as_str()))
                 .filter(|name| area == "all" || tool_area(name) == area)

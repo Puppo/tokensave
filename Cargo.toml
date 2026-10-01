@@ -233,6 +233,11 @@ path = "tests/global_git_hooks_partial_failure_test.rs"
 name = "incremental_resolution_test"
 path = "tests/incremental_resolution_test.rs"
 
+# sets TOKENSAVE_BUSY_TIMEOUT_MS
+[[test]]
+name = "rebuild_lock_test"
+path = "tests/rebuild_lock_test.rs"
+
 # sets GIT_CONFIG_*, inherited by every git child
 [[test]]
 name = "local_git_hooks_shadow_test"

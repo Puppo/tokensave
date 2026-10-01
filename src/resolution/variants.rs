@@ -24,7 +24,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::types::{Edge, EdgeKind, Node, NodeKind};
+use crate::types::{Edge, EdgeKind, Node, NodeKind, ResolvedBy};
 
 /// Callable node kinds a `Calls` edge can target.
 fn is_callable(kind: &NodeKind) -> bool {
@@ -201,6 +201,7 @@ pub fn emit_variant_edges<S: std::hash::BuildHasher>(
                             target: sibling.to_string(),
                             kind: EdgeKind::Calls,
                             line: e.line,
+                            resolved_by: Some(ResolvedBy::BuildVariant),
                         });
                     }
                 }

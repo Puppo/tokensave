@@ -360,6 +360,7 @@ fn is_code_extension(ext: &str) -> bool {
             | "hpp"
             | "cs"
             | "rb"
+            | "rake"
             | "php"
             | "swift"
             | "kt"

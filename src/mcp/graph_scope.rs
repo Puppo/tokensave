@@ -266,7 +266,12 @@ pub(crate) fn merge_federated_results(
         roots.join(", ")
     );
     if !collapsed.is_empty() {
-        let names: Vec<String> = collapsed.iter().map(|p| p.display().to_string()).collect();
+        // Spelled like the kept roots: a caller that passed a canonicalized
+        // Windows path must not see its `\\?\` verbatim prefix echoed back.
+        let names: Vec<String> = collapsed
+            .iter()
+            .map(|p| normalize_provenance_path(&p.to_string_lossy()))
+            .collect();
         // Reported rather than dropped silently: a caller who named a root and
         // never sees it again is owed the reason.
         let _ = write!(

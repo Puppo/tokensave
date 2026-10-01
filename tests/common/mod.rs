@@ -69,3 +69,25 @@ pub fn qualified_test_name(module_path: &str, test: &str) -> String {
         None => test.to_string(),
     }
 }
+
+/// `path` canonicalized and spelled the way tokensave reports a root: without
+/// the `\\?\` verbatim prefix that [`Path::canonicalize`] adds on Windows.
+/// Identical to `canonicalize` elsewhere (macOS still resolves `/var` to
+/// `/private/var`).
+pub fn reported_root(path: &Path) -> String {
+    let canonical = path.canonicalize().unwrap().to_string_lossy().into_owned();
+    if let Some(rest) = canonical.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = canonical.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        canonical
+    }
+}
+
+/// `value` as it appears inside a JSON string or a JSON-quoted message, without
+/// the surrounding quotes. A Windows path's backslashes come out doubled.
+pub fn json_escaped(value: &str) -> String {
+    let quoted = serde_json::to_string(value).unwrap();
+    quoted[1..quoted.len() - 1].to_string()
+}

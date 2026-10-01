@@ -1124,57 +1124,70 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
             let project_path = tokensave::config::resolve_path_with_discovery(path);
             // Track the first stdin line if we need to peek at `initialize` roots.
             let mut peeked_line: Option<String> = None;
+            // The registered projects, loaded at most once and only when
+            // discovery fails: every fallback below and a server with no
+            // default project read the same list (#606).
+            let mut registered: Option<Vec<serve::RegisteredProject>> = None;
             let cg = match serve::ensure_initialized(&project_path).await {
                 Ok(cg) => Some(cg),
+                // An explicit `--path` names the project to serve. A folder
+                // without an index gets no default project rather than
+                // whichever registered project a fallback would pick, which
+                // would answer about a project the host never asked for
+                // (#606).
+                Err(_) if explicit_path => None,
                 Err(_) => {
                     // A linked worktree outside its main checkout: the upward
                     // walk cannot reach the main index, so borrow it the way a
-                    // nested worktree would.
-                    let from_main_worktree = if explicit_path {
-                        None
-                    } else {
-                        serve::resolve_serve_from_main_worktree()
-                    };
-                    // Otherwise CWD-based discovery failed (e.g. VS Code
-                    // launched us from ~). Fall back to the global DB's
-                    // registered projects.
-                    let fallback = match from_main_worktree {
+                    // nested worktree would. Otherwise CWD-based discovery
+                    // failed (e.g. VS Code launched us from ~): fall back to
+                    // the global DB's registered projects, and last of all to
+                    // the MCP `initialize` roots (e.g. a VS Code multi-folder
+                    // workspace), read from the first stdin line.
+                    let fallback = match serve::resolve_serve_from_main_worktree() {
                         Some(p) => Some(p),
-                        None => serve::resolve_serve_from_global_db().await,
-                    };
-                    match fallback {
-                        Some(p) => Some(serve::ensure_initialized(&p).await?),
                         None => {
-                            // Last resort: peek at the first stdin line for MCP
-                            // `initialize` roots (e.g. VS Code multi-folder workspace).
-                            match serve::resolve_serve_from_mcp_roots(&mut peeked_line).await {
-                                Some(p) => Some(serve::ensure_initialized(&p).await?),
-                                // No project resolved (#606). Exiting here
-                                // left the host with a failed server and the
-                                // session with no tools at all, although
-                                // `graph_root` still reaches every registered
-                                // project. Serve with no default project.
+                            let projects =
+                                registered.insert(serve::load_registered_projects().await);
+                            match serve::resolve_serve_from_global_db(projects) {
+                                Some(p) => Some(p),
                                 None => {
-                                    eprintln!(
-                                        "[tokensave] no TokenSave index found at '{}'; serving \
-                                         with no default project — tool calls must pass graph_root",
-                                        project_path.display()
-                                    );
-                                    None
+                                    serve::resolve_serve_from_mcp_roots(&mut peeked_line, projects)
+                                        .await
                                 }
                             }
                         }
+                    };
+                    match fallback {
+                        Some(p) => Some(serve::ensure_initialized(&p).await?),
+                        None => None,
                     }
                 }
             };
-
             let Some(cg) = cg else {
+                // No project resolved (#606). Exiting here left the host with
+                // a failed server and the session with no tools at all,
+                // although `graph_root` still reaches every registered
+                // project. Serve with no default project.
+                eprintln!(
+                    "[tokensave] no TokenSave index found at '{}'; serving with no default \
+                     project — tool calls must pass graph_root",
+                    project_path.display()
+                );
+                let registered = match registered {
+                    Some(registered) => registered,
+                    None => serve::load_registered_projects().await,
+                };
+                let registered = registered
+                    .iter()
+                    .map(|project| project.path().to_string_lossy().into_owned())
+                    .collect();
                 // No index is open, so none of the per-project startup below
                 // applies: no scope warning, memory baseline, or server
                 // registry entry, which records which server holds which index.
                 tokensave::cancel::install_signal_handlers();
                 watch_for_orphaning();
-                let server = tokensave::mcp::McpServer::new_without_project().await;
+                let server = tokensave::mcp::McpServer::new_without_project(registered).await;
                 run_mcp_server(&server, timings, peeked_line, idle_timeout_secs).await?;
                 exit_after_serve();
             };

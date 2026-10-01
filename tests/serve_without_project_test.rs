@@ -259,6 +259,67 @@ fn assert_serves_without_project(explicit_path: bool) {
             .is_some_and(|tools| !tools.is_empty()),
         "tools/list must still list tools: {tools}"
     );
+
+    // `tokensave_status` is the diagnostic tool, so it answers rather than
+    // refusing: it says there is no default project and what to do instead.
+    let status = server.request(
+        7,
+        "tools/call",
+        json!({"name": "tokensave_status", "arguments": {}}),
+    );
+    assert!(
+        status.get("error").is_none(),
+        "tokensave_status must answer with no default project: {status}"
+    );
+    let text = result_text(&status);
+    assert!(
+        text.contains("no default project") && text.contains("graph_root"),
+        "status should say there is no default project and point at graph_root: {text}"
+    );
+    assert!(
+        names_project(&text, alpha.path()) && names_project(&text, beta.path()),
+        "status should list the registered projects: {text}"
+    );
+}
+
+/// Whether a call without `graph_root` is answered, i.e. a default project
+/// is served.
+fn serves_a_default_project(server: &mut Server) -> bool {
+    let init = server.initialize();
+    assert!(init.get("result").is_some(), "initialize failed: {init}");
+    let response = server.request(
+        2,
+        "tools/call",
+        json!({"name": "tokensave_search", "arguments": {"query": "alpha_symbol"}}),
+    );
+    response.get("error").is_none()
+}
+
+#[test]
+fn an_explicit_path_without_an_index_does_not_fall_back_to_the_only_registered_project() {
+    let home = TempDir::new().expect("temp home");
+    let _alpha = init_project(home.path(), "alpha_symbol");
+    let unindexed = TempDir::new().expect("folder without an index");
+
+    let mut server = Server::spawn(home.path(), unindexed.path(), Some(unindexed.path()));
+    assert!(
+        !serves_a_default_project(&mut server),
+        "`--path` names the project to serve; a folder without an index must not \
+         silently serve another project"
+    );
+}
+
+#[test]
+fn discovery_without_a_path_still_serves_the_only_registered_project() {
+    let home = TempDir::new().expect("temp home");
+    let _alpha = init_project(home.path(), "alpha_symbol");
+    let outside = TempDir::new().expect("folder inside no project");
+
+    let mut server = Server::spawn(home.path(), outside.path(), None);
+    assert!(
+        serves_a_default_project(&mut server),
+        "with no --path and one registered project, serve keeps serving it"
+    );
 }
 
 #[test]

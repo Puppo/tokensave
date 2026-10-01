@@ -340,19 +340,6 @@ enum ServedProjects<'a> {
     None { registered: &'a [String] },
 }
 
-/// Registered projects whose index still exists on disk, sorted.
-async fn indexed_registered_projects(gdb: &GlobalDb) -> Vec<String> {
-    let mut paths: Vec<String> = gdb
-        .list_project_paths()
-        .await
-        .into_iter()
-        .filter(|path| TokenSave::is_initialized(std::path::Path::new(path)))
-        .collect();
-    paths.sort();
-    paths.dedup();
-    paths
-}
-
 /// Explains that this server has no default project (#606) and how a call
 /// can still be answered.
 fn no_default_project_message(registered: &[String]) -> String {
@@ -654,7 +641,7 @@ impl McpServer {
     /// `packages/*/target`) drove unbounded event traffic and `FileId`
     /// cache growth.
     pub async fn new(cg: TokenSave, scope_prefix: Option<String>) -> Arc<Self> {
-        Self::new_inner(Some(cg), scope_prefix, true).await
+        Self::new_inner(Some(cg), scope_prefix, true, Vec::new()).await
     }
 
     /// A server with no default project (#606), for a `serve` that resolved
@@ -666,8 +653,11 @@ impl McpServer {
     /// worked. This server answers `initialize` and `tools/list` as usual,
     /// serves `graph_root` calls, and refuses a call without one with the
     /// list of registered projects to choose from.
-    pub async fn new_without_project() -> Arc<Self> {
-        Self::new_inner(None, None, false).await
+    ///
+    /// `registered_projects` are the registered projects whose index exists,
+    /// as `serve` already probed them; the server does not probe them again.
+    pub async fn new_without_project(registered_projects: Vec<String>) -> Arc<Self> {
+        Self::new_inner(None, None, false, registered_projects).await
     }
 
     /// [`Self::new`] for a server whose project root was named explicitly
@@ -678,13 +668,14 @@ impl McpServer {
     /// suppressed; its "run `tokensave init` here" remedy is wrong for a
     /// deliberate cross-repo serve (#201).
     pub async fn new_explicit_root(cg: TokenSave, scope_prefix: Option<String>) -> Arc<Self> {
-        Self::new_inner(Some(cg), scope_prefix, false).await
+        Self::new_inner(Some(cg), scope_prefix, false, Vec::new()).await
     }
 
     async fn new_inner(
         cg: Option<TokenSave>,
         scope_prefix: Option<String>,
         check_worktree_mismatch: bool,
+        registered_projects: Vec<String>,
     ) -> Arc<Self> {
         // The DB stores `/`-separated paths on every platform, but the scope
         // prefix is derived from an OS path, so on Windows it arrives with
@@ -722,18 +713,12 @@ impl McpServer {
         let global_db = GlobalDb::open().await;
         // Register this project in the global DB with its current tokens
         let mut sibling_projects = Vec::new();
-        let mut registered_projects = Vec::new();
-        if let Some(ref gdb) = global_db {
-            match &cg {
-                Some(cg) => {
-                    gdb.upsert(cg.project_root(), persisted).await;
-                    // Snapshot the neighbouring graphs once, for the initialize
-                    // instructions (#375). `tokensave_status` re-reads them live, so a
-                    // project indexed later in the session is still discoverable.
-                    sibling_projects = gdb.sibling_projects(cg.project_root()).await;
-                }
-                None => registered_projects = indexed_registered_projects(gdb).await,
-            }
+        if let (Some(gdb), Some(cg)) = (global_db.as_ref(), cg.as_ref()) {
+            gdb.upsert(cg.project_root(), persisted).await;
+            // Snapshot the neighbouring graphs once, for the initialize
+            // instructions (#375). `tokensave_status` re-reads them live, so a
+            // project indexed later in the session is still discoverable.
+            sibling_projects = gdb.sibling_projects(cg.project_root()).await;
         }
 
         // Detect borrowed-worktree index once at startup so every read
@@ -1090,6 +1075,21 @@ impl McpServer {
             || crate::config::Toolset::resolve(crate::config::Toolset::default()),
             TokenSave::toolset,
         )
+    }
+
+    /// The `tokensave_status` answer of a server with no default project
+    /// (#606): that there is none, the registered projects `graph_root` can
+    /// select, how to proceed, and the server's own counters.
+    async fn no_default_project_status(&self) -> Value {
+        let status = json!({
+            "default_project": Value::Null,
+            "registered_projects": self.registered_projects,
+            "hint": no_default_project_message(&self.registered_projects),
+            "version": env!("CARGO_PKG_VERSION"),
+            "server": self.server_stats_json().await,
+        });
+        let text = serde_json::to_string_pretty(&status).unwrap_or_default();
+        json!({ "content": [{ "type": "text", "text": text }] })
     }
 
     /// The refusal of a call that needs the default project when there is
@@ -2536,8 +2536,13 @@ impl McpServer {
         };
 
         if selected.is_none() {
-            // #606: with no default project, only `graph_root` can answer.
+            // #606: with no default project, only `graph_root` can answer —
+            // except `tokensave_status`, the diagnostic tool, which reports
+            // that state instead of refusing.
             if self.cg.is_none() {
+                if tool_name == "tokensave_status" {
+                    return JsonRpcResponse::success(id, self.no_default_project_status().await);
+                }
                 return self.no_default_project_error(id);
             }
             if let Some(reason) = self.branch_drift_refusal(tool_name) {

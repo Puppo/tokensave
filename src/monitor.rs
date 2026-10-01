@@ -37,8 +37,14 @@ const MMAP_FILENAME: &str = "monitor.mmap";
 const LOCK_FILENAME: &str = "monitor.lock";
 
 /// Resolve the global `~/.tokensave/` directory.
+///
+/// Resolved the way [`crate::global_db::global_db_path`] resolves it (`HOME`,
+/// then `USERPROFILE`), so the monitor and the savings ledger it mirrors live
+/// under one home. `dirs::home_dir` asks the known-folder API on Windows and
+/// ignores both variables, which split the two whenever `HOME` or
+/// `USERPROFILE` pointed elsewhere.
 fn global_tokensave_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".tokensave"))
+    crate::agents::home_dir().map(|h| h.join(".tokensave"))
 }
 
 /// A single ring-buffer entry read from the mmap.

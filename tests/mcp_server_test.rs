@@ -18,7 +18,7 @@ use tokensave::mcp::transport::ChannelTransport;
 use tokensave::mcp::McpServer;
 use tokensave::tokensave::TokenSave;
 
-use crate::common::qualified_test_name;
+use crate::common::{json_escaped, qualified_test_name, reported_root};
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -38,6 +38,20 @@ async fn setup_server() -> (TempDir, Arc<McpServer>) {
     cg.index_all().await.unwrap();
     let server = McpServer::new(cg, None).await;
     (dir, server)
+}
+
+/// Reopens `cg`'s project with `report_savings = true` written to its config.
+///
+/// Reporting is off by default (#561), so every test that inspects the
+/// `tokensave_metrics:` line turns it on explicitly rather than relying on
+/// the default.
+async fn with_report_savings(cg: TokenSave) -> TokenSave {
+    let project = cg.project_root().to_path_buf();
+    drop(cg);
+    let mut config = tokensave::config::load_config(&project).unwrap();
+    config.report_savings = true;
+    tokensave::config::save_config(&project, &config).unwrap();
+    TokenSave::open(&project).await.unwrap()
 }
 
 async fn setup_named_project(function_name: &str) -> (TempDir, TokenSave) {
@@ -289,6 +303,25 @@ fn response_structured_ids(response: &Value) -> Vec<String> {
             collect_structured_ids(&value, &mut ids);
             ids
         })
+}
+
+/// A status response's text with the `sibling_projects` list removed from its
+/// JSON payload, so path checks see only what describes the answered graph.
+fn status_text_without_siblings(response: &Value) -> String {
+    response["result"]["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item["text"].as_str())
+        .map(|text| match serde_json::from_str::<Value>(text) {
+            Ok(Value::Object(mut payload)) => {
+                payload.remove("sibling_projects");
+                serde_json::to_string_pretty(&payload).unwrap()
+            }
+            _ => text.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn response_payload(response: &Value) -> Value {
@@ -812,12 +845,7 @@ async fn selected_search_is_stateless_and_preserves_local_default() {
     assert!(!selected_text.contains("local_only"), "{selected_text}");
     assert_eq!(
         selected["result"]["_meta"]["tokensave"]["graph_root"],
-        foreign_dir
-            .path()
-            .canonicalize()
-            .unwrap()
-            .display()
-            .to_string()
+        reported_root(foreign_dir.path())
     );
     assert_eq!(selected["result"]["_meta"]["tokensave"]["selected"], true);
     assert!(
@@ -1224,6 +1252,11 @@ async fn selected_truncated_structured_output_returns_clear_error() {
         json!({
             "query": "huge_item",
             "limit": 500,
+            // Search defaults to text output without node IDs; a truncated
+            // payload with no references to qualify is returned as is, so ask
+            // for the JSON shape with IDs to exercise the refusal.
+            "format": "json",
+            "ids": true,
             "graph_root": foreign_dir.path().display().to_string()
         }),
     )
@@ -1245,9 +1278,14 @@ async fn selectors_are_rejected_for_non_graph_scoped_tools_before_dispatch() {
     let graph_root = foreign_dir.path().display().to_string();
 
     let calls = [
+        // A read-only local-graph tool. `tokensave_status` used to stand in
+        // here, but it accepts selectors since #500.
         (
-            "tokensave_status",
-            json!({ "graph_root": graph_root.clone() }),
+            "tokensave_affected",
+            json!({
+                "files": ["src/main.rs"],
+                "graph_root": graph_root.clone()
+            }),
         ),
         (
             "tokensave_str_replace",
@@ -1283,7 +1321,10 @@ async fn selectors_are_rejected_for_non_graph_scoped_tools_before_dispatch() {
     assert!(!source.contains("after_edit"), "{source}");
     let stats = server.server_stats_json().await;
     assert_eq!(stats["tool_calls"], 3, "{stats}");
-    assert_eq!(stats["tool_call_counts"]["tokensave_status"], 1, "{stats}");
+    assert_eq!(
+        stats["tool_call_counts"]["tokensave_affected"], 1,
+        "{stats}"
+    );
     assert_eq!(
         stats["tool_call_counts"]["tokensave_str_replace"], 1,
         "{stats}"
@@ -1756,7 +1797,7 @@ async fn selected_warnings_use_canonical_selected_root_remedies() {
     foreign.checkpoint().await.unwrap();
     drop(foreign);
     let server = McpServer::new(local, None).await;
-    let canonical_root = foreign_dir.path().canonicalize().unwrap();
+    let canonical_root = reported_root(foreign_dir.path());
 
     let response = call_server(
         &server,
@@ -1771,7 +1812,9 @@ async fn selected_warnings_use_canonical_selected_root_remedies() {
 
     assert!(response["error"].is_null(), "{response}");
     let text = response_text(&response);
-    let quoted_root = format!("\"{}\"", canonical_root.display());
+    // Warnings quote the root as a JSON string, which doubles a Windows
+    // path's backslashes.
+    let quoted_root = serde_json::to_string(&canonical_root).unwrap();
     assert!(text.contains(&quoted_root), "{text}");
     assert!(
         text.contains("Run Tokensave synchronization from selected project root"),
@@ -1918,7 +1961,7 @@ async fn selected_calls_skip_all_accounting_and_preserve_local_schema_charge() {
     let (local_dir, local) = setup_named_project("local_only").await;
     let (foreign_dir, foreign) = setup_named_project("foreign_only").await;
     drop(foreign);
-    let server = McpServer::new(local, None).await;
+    let server = McpServer::new(with_report_savings(local).await, None).await;
     assert!(
         server
             .wait_for_startup_catch_up(std::time::Duration::from_secs(30))
@@ -2213,7 +2256,7 @@ async fn test_search_metrics_are_capped_and_net() {
     fs::write(project.join("src/main.rs"), &padded_source).unwrap();
     let cg = TokenSave::init(project).await.unwrap();
     cg.index_all().await.unwrap();
-    let server = McpServer::new(cg, None).await;
+    let server = McpServer::new(with_report_savings(cg).await, None).await;
 
     let responses = run_server_with_messages(
         server,
@@ -2307,7 +2350,7 @@ async fn test_schema_overhead_survives_a_failed_first_call() {
     fs::write(project.join("src/main.rs"), &padded_source).unwrap();
     let cg = TokenSave::init(project).await.unwrap();
     cg.index_all().await.unwrap();
-    let server = McpServer::new(cg, None).await;
+    let server = McpServer::new(with_report_savings(cg).await, None).await;
 
     let search_call = || {
         jsonrpc_request(
@@ -2436,7 +2479,7 @@ async fn test_uncached_full_read_baseline_matches_file_weight() {
     fs::write(project.join("src/main.rs"), &padded_source).unwrap();
     let cg = TokenSave::init(project).await.unwrap();
     cg.index_all().await.unwrap();
-    let server = McpServer::new(cg, None).await;
+    let server = McpServer::new(with_report_savings(cg).await, None).await;
 
     let file_tokens = (padded_source.len() / 4) as u64;
 
@@ -2483,7 +2526,7 @@ async fn test_cached_read_baseline_is_capped_not_full_file() {
     fs::write(project.join("src/main.rs"), &padded_source).unwrap();
     let cg = TokenSave::init(project).await.unwrap();
     cg.index_all().await.unwrap();
-    let server = McpServer::new(cg, None).await;
+    let server = McpServer::new(with_report_savings(cg).await, None).await;
 
     let file_tokens = (padded_source.len() / 4) as u64;
     let read_call = |id: i64| {
@@ -2599,7 +2642,7 @@ async fn test_schema_overhead_not_charged_without_tools_list() {
     fs::write(project.join("src/main.rs"), &padded_source).unwrap();
     let cg = TokenSave::init(project).await.unwrap();
     cg.index_all().await.unwrap();
-    let server = McpServer::new(cg, None).await;
+    let server = McpServer::new(with_report_savings(cg).await, None).await;
 
     let responses = run_server_with_messages(
         server,
@@ -2647,7 +2690,7 @@ async fn test_schema_overhead_charged_after_tools_list_call() {
     fs::write(project.join("src/main.rs"), &padded_source).unwrap();
     let cg = TokenSave::init(project).await.unwrap();
     cg.index_all().await.unwrap();
-    let server = McpServer::new(cg, None).await;
+    let server = McpServer::new(with_report_savings(cg).await, None).await;
 
     let responses = run_server_with_messages(
         server,
@@ -2689,7 +2732,18 @@ async fn test_schema_overhead_charged_after_tools_list_call() {
 /// honest when it matches exactly what the response contains.
 #[tokio::test]
 async fn test_zero_before_call_never_gets_a_metrics_line() {
-    let (_dir, server) = setup_server().await;
+    let dir = TempDir::new().unwrap();
+    let project = dir.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(
+        project.join("src/main.rs"),
+        "fn main() { let x = helper(); }\nfn helper() -> i32 { 42 }\n",
+    )
+    .unwrap();
+    let cg = TokenSave::init(project).await.unwrap();
+    cg.index_all().await.unwrap();
+    // Reporting on, so the absent line is down to `before == 0` alone.
+    let server = McpServer::new(with_report_savings(cg).await, None).await;
 
     let responses = run_server_with_messages(
         server,
@@ -2746,7 +2800,7 @@ async fn test_schema_debt_is_paid_down_not_discarded() {
     fs::write(project.join("src/main.rs"), &padded_source).unwrap();
     let cg = TokenSave::init(project).await.unwrap();
     cg.index_all().await.unwrap();
-    let server = McpServer::new(cg, None).await;
+    let server = McpServer::new(with_report_savings(cg).await, None).await;
 
     let status_call = |id: i64| {
         jsonrpc_request(
@@ -3819,21 +3873,23 @@ async fn selected_status_reports_the_selected_graph() {
     .await;
     assert!(selected["error"].is_null(), "{selected}");
 
-    let text = response_text(&selected);
-    let foreign_root = foreign_dir.path().canonicalize().unwrap();
+    // Sibling projects are listed by path, and in a shared temp directory the
+    // local project is often one of them, so they are left out of the check.
+    let text = status_text_without_siblings(&selected);
+    let foreign_root = json_escaped(&reported_root(foreign_dir.path()));
+    // The local project reports its root as it was opened, which on macOS is
+    // the `/var` spelling rather than the canonical `/private/var` one, so
+    // check both.
+    let local_roots = [
+        json_escaped(&reported_root(local_dir.path())),
+        json_escaped(&local_dir.path().to_string_lossy()),
+    ];
     assert!(
-        text.contains(&foreign_root.display().to_string()),
+        text.contains(&foreign_root),
         "status should describe the selected project: {text}"
     );
     assert!(
-        !text.contains(
-            &local_dir
-                .path()
-                .canonicalize()
-                .unwrap()
-                .display()
-                .to_string()
-        ),
+        !local_roots.iter().any(|root| text.contains(root.as_str())),
         "status must not describe the local project: {text}"
     );
     assert_eq!(selected["result"]["_meta"]["tokensave"]["selected"], true);
@@ -3841,9 +3897,15 @@ async fn selected_status_reports_the_selected_graph() {
     // The local call still answers for the server's own project.
     let local_status = call_server(&server, 72, "tokensave_status", json!({})).await;
     assert!(local_status["error"].is_null(), "{local_status}");
-    let local_text = response_text(&local_status);
+    let local_text = status_text_without_siblings(&local_status);
     assert!(
-        !local_text.contains(&foreign_root.display().to_string()),
+        local_roots
+            .iter()
+            .any(|root| local_text.contains(root.as_str())),
+        "an unselected status must answer for the local project: {local_text}"
+    );
+    assert!(
+        !local_text.contains(&foreign_root),
         "an unselected status must still answer for the local project: {local_text}"
     );
     let _ = local_dir;

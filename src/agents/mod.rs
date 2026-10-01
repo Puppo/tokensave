@@ -152,7 +152,7 @@ pub mod traits;
 
 use std::path::{Path, PathBuf};
 
-use crate::mcp::tools::get_tool_definitions;
+use crate::mcp::tools::get_installable_tool_definitions;
 
 pub use fs::*;
 pub use hooks::*;
@@ -370,15 +370,16 @@ mod which_tokensave_tests {
     }
 }
 
+/// Every tool an agent integration grants, `tokensave_more` included (#576).
 pub fn tool_names() -> Vec<String> {
-    get_tool_definitions()
+    get_installable_tool_definitions()
         .iter()
         .map(|t| t.name.clone())
         .collect()
 }
 
 pub fn read_only_tool_names() -> Vec<String> {
-    get_tool_definitions()
+    get_installable_tool_definitions()
         .iter()
         .filter(|t| {
             t.annotations
@@ -392,7 +393,7 @@ pub fn read_only_tool_names() -> Vec<String> {
 }
 
 pub fn expected_tool_perms() -> Vec<String> {
-    get_tool_definitions()
+    get_installable_tool_definitions()
         .iter()
         .map(|t| format!("mcp__tokensave__{}", t.name))
         .collect()

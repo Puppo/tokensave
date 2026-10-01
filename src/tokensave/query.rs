@@ -814,7 +814,7 @@ impl TokenSave {
     /// config, letting the `TOKENSAVE_TOOLS` env var override it per-run. A
     /// value that names no toolset is ignored.
     pub fn toolset(&self) -> crate::config::Toolset {
-        crate::config::Toolset::resolve(self.config.tools)
+        crate::config::Toolset::resolve(self.config.tools.unwrap_or_default())
     }
 
     /// Recompute the on-disk path to the `SQLite` DB this instance is

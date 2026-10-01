@@ -1621,7 +1621,10 @@ pub(super) async fn handle_outline(cg: &TokenSave, args: Value) -> Result<ToolRe
             obj.insert("doc_path".to_string(), json!(doc_paths));
             obj.insert(
                 "doc_hint".to_string(),
-                json!("call tokensave_doc for the summary before reading this file"),
+                json!(format!(
+                    "call {} for the summary before reading this file",
+                    crate::mcp::tools::reachable_tool_name("tokensave_doc")
+                )),
             );
         }
     }

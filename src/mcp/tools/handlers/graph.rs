@@ -56,7 +56,8 @@ async fn require_existing_node(cg: &TokenSave, node_id: &str) -> Result<Node> {
             message: format!(
                 "node not found: '{node_id}'. `node_id` expects a graph node ID \
                  (e.g. from tokensave_search results); to look up by symbol name \
-                 use tokensave_callers_for or tokensave_search."
+                 use {} or tokensave_search.",
+                crate::mcp::tools::reachable_tool_name("tokensave_callers_for")
             ),
         })
 }

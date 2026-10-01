@@ -40,6 +40,20 @@ async fn setup_server() -> (TempDir, Arc<McpServer>) {
     (dir, server)
 }
 
+/// Reopens `cg`'s project with `report_savings = true` written to its config.
+///
+/// Reporting is off by default (#561), so every test that inspects the
+/// `tokensave_metrics:` line turns it on explicitly rather than relying on
+/// the default.
+async fn with_report_savings(cg: TokenSave) -> TokenSave {
+    let project = cg.project_root().to_path_buf();
+    drop(cg);
+    let mut config = tokensave::config::load_config(&project).unwrap();
+    config.report_savings = true;
+    tokensave::config::save_config(&project, &config).unwrap();
+    TokenSave::open(&project).await.unwrap()
+}
+
 async fn setup_named_project(function_name: &str) -> (TempDir, TokenSave) {
     let dir = TempDir::new().unwrap();
     let project = dir.path();
@@ -1224,6 +1238,11 @@ async fn selected_truncated_structured_output_returns_clear_error() {
         json!({
             "query": "huge_item",
             "limit": 500,
+            // Search defaults to text output without node IDs; a truncated
+            // payload with no references to qualify is returned as is, so ask
+            // for the JSON shape with IDs to exercise the refusal.
+            "format": "json",
+            "ids": true,
             "graph_root": foreign_dir.path().display().to_string()
         }),
     )
@@ -1245,9 +1264,14 @@ async fn selectors_are_rejected_for_non_graph_scoped_tools_before_dispatch() {
     let graph_root = foreign_dir.path().display().to_string();
 
     let calls = [
+        // A read-only local-graph tool. `tokensave_status` used to stand in
+        // here, but it accepts selectors since #500.
         (
-            "tokensave_status",
-            json!({ "graph_root": graph_root.clone() }),
+            "tokensave_affected",
+            json!({
+                "files": ["src/main.rs"],
+                "graph_root": graph_root.clone()
+            }),
         ),
         (
             "tokensave_str_replace",
@@ -1283,7 +1307,10 @@ async fn selectors_are_rejected_for_non_graph_scoped_tools_before_dispatch() {
     assert!(!source.contains("after_edit"), "{source}");
     let stats = server.server_stats_json().await;
     assert_eq!(stats["tool_calls"], 3, "{stats}");
-    assert_eq!(stats["tool_call_counts"]["tokensave_status"], 1, "{stats}");
+    assert_eq!(
+        stats["tool_call_counts"]["tokensave_affected"], 1,
+        "{stats}"
+    );
     assert_eq!(
         stats["tool_call_counts"]["tokensave_str_replace"], 1,
         "{stats}"
@@ -1918,7 +1945,7 @@ async fn selected_calls_skip_all_accounting_and_preserve_local_schema_charge() {
     let (local_dir, local) = setup_named_project("local_only").await;
     let (foreign_dir, foreign) = setup_named_project("foreign_only").await;
     drop(foreign);
-    let server = McpServer::new(local, None).await;
+    let server = McpServer::new(with_report_savings(local).await, None).await;
     assert!(
         server
             .wait_for_startup_catch_up(std::time::Duration::from_secs(30))
@@ -2213,7 +2240,7 @@ async fn test_search_metrics_are_capped_and_net() {
     fs::write(project.join("src/main.rs"), &padded_source).unwrap();
     let cg = TokenSave::init(project).await.unwrap();
     cg.index_all().await.unwrap();
-    let server = McpServer::new(cg, None).await;
+    let server = McpServer::new(with_report_savings(cg).await, None).await;
 
     let responses = run_server_with_messages(
         server,
@@ -2307,7 +2334,7 @@ async fn test_schema_overhead_survives_a_failed_first_call() {
     fs::write(project.join("src/main.rs"), &padded_source).unwrap();
     let cg = TokenSave::init(project).await.unwrap();
     cg.index_all().await.unwrap();
-    let server = McpServer::new(cg, None).await;
+    let server = McpServer::new(with_report_savings(cg).await, None).await;
 
     let search_call = || {
         jsonrpc_request(
@@ -2436,7 +2463,7 @@ async fn test_uncached_full_read_baseline_matches_file_weight() {
     fs::write(project.join("src/main.rs"), &padded_source).unwrap();
     let cg = TokenSave::init(project).await.unwrap();
     cg.index_all().await.unwrap();
-    let server = McpServer::new(cg, None).await;
+    let server = McpServer::new(with_report_savings(cg).await, None).await;
 
     let file_tokens = (padded_source.len() / 4) as u64;
 
@@ -2483,7 +2510,7 @@ async fn test_cached_read_baseline_is_capped_not_full_file() {
     fs::write(project.join("src/main.rs"), &padded_source).unwrap();
     let cg = TokenSave::init(project).await.unwrap();
     cg.index_all().await.unwrap();
-    let server = McpServer::new(cg, None).await;
+    let server = McpServer::new(with_report_savings(cg).await, None).await;
 
     let file_tokens = (padded_source.len() / 4) as u64;
     let read_call = |id: i64| {
@@ -2599,7 +2626,7 @@ async fn test_schema_overhead_not_charged_without_tools_list() {
     fs::write(project.join("src/main.rs"), &padded_source).unwrap();
     let cg = TokenSave::init(project).await.unwrap();
     cg.index_all().await.unwrap();
-    let server = McpServer::new(cg, None).await;
+    let server = McpServer::new(with_report_savings(cg).await, None).await;
 
     let responses = run_server_with_messages(
         server,
@@ -2647,7 +2674,7 @@ async fn test_schema_overhead_charged_after_tools_list_call() {
     fs::write(project.join("src/main.rs"), &padded_source).unwrap();
     let cg = TokenSave::init(project).await.unwrap();
     cg.index_all().await.unwrap();
-    let server = McpServer::new(cg, None).await;
+    let server = McpServer::new(with_report_savings(cg).await, None).await;
 
     let responses = run_server_with_messages(
         server,
@@ -2689,7 +2716,18 @@ async fn test_schema_overhead_charged_after_tools_list_call() {
 /// honest when it matches exactly what the response contains.
 #[tokio::test]
 async fn test_zero_before_call_never_gets_a_metrics_line() {
-    let (_dir, server) = setup_server().await;
+    let dir = TempDir::new().unwrap();
+    let project = dir.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(
+        project.join("src/main.rs"),
+        "fn main() { let x = helper(); }\nfn helper() -> i32 { 42 }\n",
+    )
+    .unwrap();
+    let cg = TokenSave::init(project).await.unwrap();
+    cg.index_all().await.unwrap();
+    // Reporting on, so the absent line is down to `before == 0` alone.
+    let server = McpServer::new(with_report_savings(cg).await, None).await;
 
     let responses = run_server_with_messages(
         server,
@@ -2746,7 +2784,7 @@ async fn test_schema_debt_is_paid_down_not_discarded() {
     fs::write(project.join("src/main.rs"), &padded_source).unwrap();
     let cg = TokenSave::init(project).await.unwrap();
     cg.index_all().await.unwrap();
-    let server = McpServer::new(cg, None).await;
+    let server = McpServer::new(with_report_savings(cg).await, None).await;
 
     let status_call = |id: i64| {
         jsonrpc_request(

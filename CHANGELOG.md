@@ -11,6 +11,9 @@ and this project uses [maintenance-based versioning](TOKENSAVE-VERSIONING.md), n
 - `.rake` files are now indexed as Ruby source, including Ruby cross-file resolution and language reporting (#623). Contributed by @janstol.
 - Ruby class and module declarations that reopen the same constant are linked across files, so the graph keeps their separate definitions connected after incremental sync (#622). Contributed by @janstol.
 
+### Fixed
+- **Refreshing a rules block in a shared instructions file now replaces it where it is (#621).** `write_rules_block` removed the old `<!-- tokensave rules begin ... -->` ... `<!-- tokensave rules end -->` block and appended the new one at the end of the file, so on every rules-text change any text the owner kept below the end marker moved above it. The new block now takes the old one's position, and the text before and after the markers is kept byte-for-byte; only a later duplicate block or a stale pre-#441 `## Prefer tokensave MCP tools` block outside the markers is still removed. A file with no block still gets one appended. This is the shared writer behind Copilot's `copilot-instructions.md` and the shared files of Codex, Droid, Gemini, Grok, Kimi, Kiro, Pi, Qwen and Vibe; Claude, Augment, OMP and OpenCode write a tokensave-owned rules file instead and were not affected; Cursor and the remaining agents install no rules text. Reported by @xorets.
+
 ## [7.13.0] - 2026-09-29
 
 ### Added

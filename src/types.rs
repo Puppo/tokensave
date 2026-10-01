@@ -268,6 +268,8 @@ pub enum EdgeKind {
     /// hierarchy, not invocation, and folding it into `Calls` would pollute
     /// callers/callees, impact, and dead-code for every other language.
     Instantiates,
+    /// Another declaration of the same Ruby class or module.
+    Reopens,
 }
 
 #[allow(clippy::should_implement_trait)]
@@ -287,6 +289,7 @@ impl EdgeKind {
             EdgeKind::Receives => "receives",
             EdgeKind::Documents => "documents",
             EdgeKind::Instantiates => "instantiates",
+            EdgeKind::Reopens => "reopens",
         }
     }
 
@@ -305,6 +308,7 @@ impl EdgeKind {
             "receives" => Some(EdgeKind::Receives),
             "documents" => Some(EdgeKind::Documents),
             "instantiates" => Some(EdgeKind::Instantiates),
+            "reopens" => Some(EdgeKind::Reopens),
             _ => None,
         }
     }

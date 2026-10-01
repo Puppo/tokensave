@@ -1225,7 +1225,7 @@ fn def_rank() -> ToolDefinition {
             "properties": {
                 "edge_kind": {
                     "type": "string",
-                    "enum": ["implements", "extends", "calls", "uses", "contains", "annotates", "derives_macro", "instantiates"],
+                    "enum": ["implements", "extends", "calls", "uses", "contains", "annotates", "derives_macro", "instantiates", "reopens"],
                     "description": "The relationship type to rank by (e.g. 'implements' to find most-implemented interfaces)"
                 },
                 "direction": {

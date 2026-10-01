@@ -495,26 +495,44 @@ pub fn write_rules_block(path: &Path, agent_id: &str, body: &str) -> Result<bool
         String::new()
     };
 
-    // Already current?
-    if let Some((installed_body, _, _)) = find_rules_block(&contents) {
+    let new_contents = if let Some((installed_body, start, end)) = find_rules_block(&contents) {
+        // Already current?
         if installed_body.trim_end() == body.trim_end() {
             return Ok(false);
         }
-    }
-
-    // Migrate away any managed-block or heading-guarded block before appending
-    // the new marker-delimited block. Remove the managed block first so the
-    // legacy heading marker inside it does not trigger a false match.
-    let contents = remove_legacy_rules_block_from_contents(
-        &remove_rules_block_from_contents(&contents),
-        LEGACY_RULES_MARKER,
-        &[],
-    );
-
-    let new_contents = if contents.trim().is_empty() {
-        new_block
+        // Refresh in place (issue #621): the new block takes the old one's
+        // position and the owner's text on either side is kept byte-for-byte.
+        // Only later duplicate blocks and stale legacy heading blocks outside
+        // the markers are migrated away.
+        let mut prefix = contents[..start].to_string();
+        if prefix.contains(LEGACY_RULES_MARKER) {
+            // Migration trims whitespace; restore a blank line before the block.
+            prefix = remove_legacy_rules_block_from_contents(&prefix, LEGACY_RULES_MARKER, &[]);
+            if !prefix.is_empty() {
+                prefix = format!("{}\n\n", prefix.trim_end());
+            }
+        }
+        let mut suffix = remove_rules_block_from_contents(&contents[end..]);
+        if suffix != contents[end..] && !suffix.is_empty() && !suffix.ends_with('\n') {
+            // Collapsing a trailing duplicate block trims the final newline.
+            suffix.push('\n');
+        }
+        if suffix.contains(LEGACY_RULES_MARKER) {
+            // Migration trims whitespace; restore a blank line after the block.
+            suffix = remove_legacy_rules_block_from_contents(&suffix, LEGACY_RULES_MARKER, &[]);
+            if !suffix.is_empty() {
+                suffix = format!("\n{}\n", suffix.trim_end());
+            }
+        }
+        format!("{prefix}{new_block}{suffix}")
     } else {
-        format!("{}\n\n{new_block}", contents.trim_end())
+        // Fresh install: migrate any legacy heading-guarded block, then append.
+        let contents = remove_legacy_rules_block_from_contents(&contents, LEGACY_RULES_MARKER, &[]);
+        if contents.trim().is_empty() {
+            new_block
+        } else {
+            format!("{}\n\n{new_block}", contents.trim_end())
+        }
     };
 
     backup_config_file(path)?;
@@ -1218,6 +1236,79 @@ mod tests {
             "only one block should remain after collapsing duplicates"
         );
         assert!(contents.contains(BLOCK_END_MARKER));
+    }
+
+    /// Issue #621: refreshing an existing block must replace it where it is,
+    /// not remove it and append the new one at the end of the file — the
+    /// owner's text above and below the markers stays exactly where it was.
+    #[test]
+    fn write_rules_block_refreshes_in_place() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("copilot-instructions.md");
+        let stale_marker = block_start_marker("copilot", "stale");
+        let before = "# Project rules\n\nAbove the block.\n\n";
+        let after = "\n## Below the block\n\nMust stay below.\n\n\n  trailing  \n";
+        std::fs::write(
+            &path,
+            format!("{before}{stale_marker}\n\nstale\n\n{BLOCK_END_MARKER}\n{after}"),
+        )
+        .unwrap();
+
+        let body = expected_rules_markdown("copilot").unwrap();
+        assert!(write_rules_block(&path, "copilot", &body).unwrap());
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let new_marker = block_start_marker("copilot", &body);
+        assert_eq!(
+            contents,
+            format!("{before}{new_marker}\n\n{body}\n\n{BLOCK_END_MARKER}\n{after}"),
+            "content outside the markers must be preserved byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn write_rules_block_in_place_collapses_later_duplicates() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("AGENTS.md");
+        let stale_marker = block_start_marker("droid", "stale");
+        let stale_block = format!("{stale_marker}\n\nstale\n\n{BLOCK_END_MARKER}\n");
+        std::fs::write(
+            &path,
+            format!("# Top\n\n{stale_block}\n# Middle\n\n{stale_block}\n# Bottom\n"),
+        )
+        .unwrap();
+        let body = expected_rules_markdown("droid").unwrap();
+        assert!(write_rules_block(&path, "droid", &body).unwrap());
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(contents.matches(BLOCK_START_PREFIX).count(), 1);
+        let block = contents.find(BLOCK_START_PREFIX).unwrap();
+        let middle = contents.find("# Middle").unwrap();
+        let bottom = contents.find("# Bottom").unwrap();
+        assert!(contents.starts_with("# Top\n\n"));
+        assert!(block < middle && middle < bottom);
+    }
+
+    #[test]
+    fn write_rules_block_in_place_still_migrates_legacy_heading_block() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("AGENTS.md");
+        let stale_marker = block_start_marker("droid", "stale");
+        std::fs::write(
+            &path,
+            format!(
+                "# Top\n\n{stale_marker}\n\nstale\n\n{BLOCK_END_MARKER}\n\n\
+                 ## Prefer tokensave MCP tools\n\nOld stale text.\n\n## Mine\n\nKeep.\n"
+            ),
+        )
+        .unwrap();
+        let body = expected_rules_markdown("droid").unwrap();
+        assert!(write_rules_block(&path, "droid", &body).unwrap());
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let new_marker = block_start_marker("droid", &body);
+        assert_eq!(
+            contents,
+            format!("# Top\n\n{new_marker}\n\n{body}\n\n{BLOCK_END_MARKER}\n\n## Mine\n\nKeep.\n")
+        );
     }
 
     #[test]

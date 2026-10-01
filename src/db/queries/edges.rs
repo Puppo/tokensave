@@ -6,6 +6,78 @@ use super::*;
 // ---------------------------------------------------------------------------
 
 impl Database {
+    /// Link later Ruby declarations to a stable representative of the same constant.
+    /// Keep declaration nodes separate so their source locations and members survive.
+    /// Recomputing the full relation after each Ruby change also repairs links after deletions and moves.
+    pub async fn rebuild_ruby_reopenings(&self) -> Result<()> {
+        let _write_guard = self.write_lock.lock().await;
+        self.conn()
+            .execute("BEGIN", ())
+            .await
+            .map_err(|e| TokenSaveError::Database {
+                message: format!("failed to begin Ruby reopening rebuild: {e}"),
+                operation: "rebuild_ruby_reopenings".to_string(),
+            })?;
+
+        // Ruby extraction currently writes file::file::name; the single-prefix branch accepts older or alternate rows, and ltrim removes the absolute :: marker from names such as class ::Entry.
+        let result = async {
+            self.conn()
+                .execute("DELETE FROM edges WHERE kind = 'reopens'", ())
+                .await?;
+            self.conn()
+                .execute(
+                    "INSERT INTO edges (source, target, kind, line)
+                     SELECT id, canonical_id, 'reopens', start_line
+                     FROM (
+                         SELECT id, start_line,
+                                FIRST_VALUE(id) OVER declaration AS canonical_id,
+                                ROW_NUMBER() OVER declaration AS declaration_number
+                         FROM (
+                             SELECT id, kind, file_path, start_line, start_column,
+                                    ltrim(CASE
+                                        WHEN substr(qualified_name, 1, length(file_path) * 2 + 4) = file_path || '::' || file_path || '::'
+                                        THEN substr(qualified_name, length(file_path) * 2 + 5)
+                                        ELSE substr(qualified_name, length(file_path) + 3)
+                                    END, ':') AS constant_name
+                             FROM nodes
+                             WHERE kind IN ('class', 'module')
+                               AND file_path LIKE '%.rb'
+                               AND qualified_name NOT LIKE '%<anonymous>%'
+                               AND substr(qualified_name, 1, length(file_path) + 2) = file_path || '::'
+                         )
+                         WINDOW declaration AS (
+                             PARTITION BY kind, constant_name
+                             ORDER BY file_path, start_line, start_column, id
+                         )
+                     )
+                     WHERE declaration_number > 1",
+                    (),
+                )
+                .await?;
+            Ok::<(), libsql::Error>(())
+        }
+        .await;
+
+        match result {
+            Ok(()) => self
+                .conn()
+                .execute("COMMIT", ())
+                .await
+                .map(|_| ())
+                .map_err(|e| TokenSaveError::Database {
+                    message: format!("failed to commit Ruby reopening rebuild: {e}"),
+                    operation: "rebuild_ruby_reopenings".to_string(),
+                }),
+            Err(e) => {
+                let _ = self.conn().execute("ROLLBACK", ()).await;
+                Err(TokenSaveError::Database {
+                    message: format!("failed to rebuild Ruby reopenings: {e}"),
+                    operation: "rebuild_ruby_reopenings".to_string(),
+                })
+            }
+        }
+    }
+
     /// Inserts a single edge, skipping silently if either endpoint is missing.
     pub async fn insert_edge(&self, edge: &Edge) -> Result<()> {
         // Contains is denormalized to nodes.parent_id since v9. Fold the

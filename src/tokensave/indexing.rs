@@ -4,6 +4,12 @@ use super::*;
 
 const RUBY_SINGLETON_KIND_METADATA: &str = "ruby_singleton_method_kind_v1";
 
+fn is_ruby_source(path: &str) -> bool {
+    std::path::Path::new(path)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("rb"))
+}
+
 fn legacy_ruby_repair_complete(
     repair_required: bool,
     scheduled: &[String],
@@ -520,6 +526,7 @@ impl TokenSave {
 
         // 8. Restore indexes and normal durability
         self.db.end_bulk_load().await?;
+        self.db.rebuild_ruby_reopenings().await?;
         self.db.rebuild_trait_dispatch_callers().await?;
         on_verbose(&format!(
             "wrote to database in {:.1}s",
@@ -844,6 +851,7 @@ impl TokenSave {
         // in case a future internal caller skips the wrappers. The DB's
         // canonical form is forward-slash (#87).
         let file_paths = normalize_rel_paths(file_paths);
+        let ruby_changed = file_paths.iter().any(|path| is_ruby_source(path));
 
         // Files deleted from disk produce no extraction, so the replace-on-
         // reindex path below would never drop their rows — prune them here,
@@ -984,6 +992,9 @@ impl TokenSave {
             }
         }
 
+        if ruby_changed {
+            self.db.rebuild_ruby_reopenings().await?;
+        }
         self.db.rebuild_trait_dispatch_callers().await?;
         self.db
             .set_metadata("last_sync_at", &current_timestamp().to_string())
@@ -1381,6 +1392,13 @@ impl TokenSave {
             ));
         }
 
+        if removed
+            .iter()
+            .chain(to_index.iter())
+            .any(|path| is_ruby_source(path))
+        {
+            self.db.rebuild_ruby_reopenings().await?;
+        }
         self.db.rebuild_trait_dispatch_callers().await?;
         let duration_ms = start.elapsed().as_millis() as u64;
         self.db
@@ -2213,6 +2231,9 @@ impl TokenSave {
             kind: FileKind::Code,
         };
         self.db.upsert_file(&file_record).await?;
+        if is_ruby_source(file_path) {
+            self.db.rebuild_ruby_reopenings().await?;
+        }
         self.db.rebuild_trait_dispatch_callers().await?;
 
         Ok(())

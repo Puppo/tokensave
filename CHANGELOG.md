@@ -8,7 +8,8 @@ and this project uses [maintenance-based versioning](TOKENSAVE-VERSIONING.md), n
 ## [Unreleased]
 
 ### Added
-- `.rake` files are now indexed as Ruby source, including Ruby cross-file resolution and language reporting.
+- `.rake` files are now indexed as Ruby source, including Ruby cross-file resolution and language reporting (#623). Contributed by @janstol.
+- Ruby class and module declarations that reopen the same constant are linked across files, so the graph keeps their separate definitions connected after incremental sync (#622). Contributed by @janstol.
 
 ## [7.13.0] - 2026-09-29
 

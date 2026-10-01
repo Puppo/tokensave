@@ -323,7 +323,7 @@ pub(crate) fn display_language_for_path(path: &str) -> &'static str {
         "cs" => "C#",
         "fs" | "fsi" | "fsx" => "F#",
         "fst" | "fsti" => "F*",
-        "rb" => "Ruby",
+        "rb" | "rake" => "Ruby",
         "php" => "PHP",
         "dart" => "Dart",
         "lua" => "Lua",

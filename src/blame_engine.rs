@@ -702,7 +702,7 @@ pub fn ts_lang_key_from_path(path: &str) -> Option<&'static str> {
         "c" | "h" => "c",
         "cpp" | "cc" | "cxx" | "hpp" | "hxx" | "hh" | "inl" | "ipp" | "tcc" | "metal" => "cpp",
         "cs" => "c_sharp",
-        "rb" => "ruby",
+        "rb" | "rake" => "ruby",
         "php" => "php",
         "scala" | "sc" => "scala",
         "dart" => "dart",
@@ -812,6 +812,7 @@ mod tests {
         assert_eq!(ts_lang_key_from_path("a.ts"), Some("typescript"));
         assert_eq!(ts_lang_key_from_path("a.proto"), Some("protobuf"));
         assert_eq!(ts_lang_key_from_path("a.cs"), Some("c_sharp"));
+        assert_eq!(ts_lang_key_from_path("lib/tasks/sample.rake"), Some("ruby"));
         assert_eq!(ts_lang_key_from_path("README.md"), None);
     }
 

@@ -871,7 +871,7 @@ Always compiled. The smallest binary for the most popular languages, plus Svelte
 | Dart | `.dart` | `lang-dart` |
 | Pascal | `.pas`, `.pp`, `.dpr` | `lang-pascal` |
 | PHP | `.php` | `lang-php` |
-| Ruby | `.rb` | `lang-ruby` |
+| Ruby | `.rb`, `.rake` | `lang-ruby` |
 | Bash | `.sh`, `.bash` | `lang-bash` |
 | Protobuf | `.proto` | `lang-protobuf` |
 | PowerShell | `.ps1`, `.psm1` | `lang-powershell` |

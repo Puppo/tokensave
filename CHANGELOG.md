@@ -7,6 +7,10 @@ and this project uses [maintenance-based versioning](TOKENSAVE-VERSIONING.md), n
 
 ## [Unreleased]
 
+### Fixed
+
+- **No more unfixable "N new tokensave tool(s) not yet permitted" warning for non-Claude users** — every command checked `~/.claude/settings.json` for tokensave tool grants even when tokensave was never installed for Claude Code (e.g. a Codex-only setup). `tokensave reinstall` only refreshes the installed agents, so it never touched that file and the warning repeated forever. The warning now fires only when the Claude settings already hold at least one tokensave grant.
+
 
 ## [7.14.0] - 2026-10-01
 

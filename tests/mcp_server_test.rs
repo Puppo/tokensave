@@ -1080,6 +1080,69 @@ async fn selected_read_rejects_paths_outside_canonical_selected_root() {
     assert_eq!(read_cache_row_count(&db_path).await, cache_rows_before);
 }
 
+/// #636: the primary project opens its DB read-write, and the containment
+/// check used to run only for read-only (federated) graphs, so a primary-root
+/// `tokensave_read` returned files from anywhere on disk and cached them.
+#[tokio::test]
+async fn primary_read_rejects_paths_outside_project_root() {
+    let (local_dir, local) = setup_named_project("local_only").await;
+    let outside_dir = TempDir::new().unwrap();
+    let outside = outside_dir.path().join("outside-secret.txt");
+    let secret = "OUTSIDE_BYTES_MUST_NOT_BE_RETURNED";
+    fs::write(&outside, secret).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, local_dir.path().join("linked-secret.txt")).unwrap();
+
+    let server = McpServer::new(local, None).await;
+    let db_path = local_dir.path().join(".tokensave/tokensave.db");
+    let cache_rows_before = read_cache_row_count(&db_path).await;
+    // Both temp dirs share a parent, so `..` reaches the secret.
+    let outside_name = outside_dir
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let mut paths = vec![
+        outside.display().to_string(),
+        format!("../{outside_name}/outside-secret.txt"),
+    ];
+    #[cfg(unix)]
+    paths.push("linked-secret.txt".to_string());
+
+    for (index, file) in paths.into_iter().enumerate() {
+        let response = call_server(
+            &server,
+            50 + index as i64,
+            "tokensave_read",
+            json!({ "file": file, "mode": "full" }),
+        )
+        .await;
+
+        // Primary-graph config errors surface as -32603, not the -32602 that
+        // selected graphs use, so assert on the rejection message instead.
+        let serialized = serde_json::to_string(&response).unwrap();
+        assert!(!serialized.contains(secret), "{serialized}");
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("resolves outside selected graph root")),
+            "{response}"
+        );
+    }
+    assert_eq!(read_cache_row_count(&db_path).await, cache_rows_before);
+
+    let inside = call_server(
+        &server,
+        60,
+        "tokensave_read",
+        json!({ "file": "src/main.rs", "mode": "full" }),
+    )
+    .await;
+    assert!(inside["error"].is_null(), "{inside}");
+    assert!(response_text(&inside).contains("local_only"), "{inside}");
+}
+
 #[tokio::test]
 async fn selected_context_qualifies_ids_without_rewriting_source_literals() {
     let (_local_dir, local) = setup_named_project("local_only").await;

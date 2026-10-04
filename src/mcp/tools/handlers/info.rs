@@ -1394,33 +1394,32 @@ pub(super) async fn handle_read(cg: &TokenSave, args: Value) -> Result<ToolResul
     } else {
         project_root.join(&rel_path)
     };
-    if cg.db().is_read_only() {
-        let canonical_root =
-            project_root
-                .canonicalize()
-                .map_err(|error| TokenSaveError::Config {
-                    message: format!(
-                        "cannot canonicalize selected graph root '{}': {error}",
-                        project_root.display()
-                    ),
-                })?;
-        let canonical_path = abs_path
-            .canonicalize()
-            .map_err(|error| TokenSaveError::Config {
-                message: format!(
-                    "cannot canonicalize selected tokensave_read path '{file}': {error}"
-                ),
-            })?;
-        if !canonical_path.starts_with(&canonical_root) {
-            return Err(TokenSaveError::Config {
-                message: format!(
-                    "selected tokensave_read path '{file}' resolves outside selected graph root '{}'; choose a file inside that root",
-                    canonical_root.display()
-                ),
-            });
-        }
-        abs_path = canonical_path;
+    // Contain the resolved path to the graph root for EVERY graph, not just
+    // read-only (federated) ones: the primary project is read-write, and without
+    // this an absolute or `..`-escaping `file` arg reads files outside the
+    // project (#636).
+    let canonical_root = project_root
+        .canonicalize()
+        .map_err(|error| TokenSaveError::Config {
+            message: format!(
+                "cannot canonicalize selected graph root '{}': {error}",
+                project_root.display()
+            ),
+        })?;
+    let canonical_path = abs_path
+        .canonicalize()
+        .map_err(|error| TokenSaveError::Config {
+            message: format!("cannot canonicalize selected tokensave_read path '{file}': {error}"),
+        })?;
+    if !canonical_path.starts_with(&canonical_root) {
+        return Err(TokenSaveError::Config {
+            message: format!(
+                "selected tokensave_read path '{file}' resolves outside selected graph root '{}'; choose a file inside that root",
+                canonical_root.display()
+            ),
+        });
     }
+    abs_path = canonical_path;
     let display_file = if abs_path.starts_with(&project_root) {
         abs_path
             .strip_prefix(&project_root)
